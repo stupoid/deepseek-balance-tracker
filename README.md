@@ -26,37 +26,67 @@ cp etc/deepseek-balance.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now deepseek-balance.timer
 
-# Optional: keep it running when logged out
+# 4. Put the commands on your PATH (or skip and use ./bin/...)
+ln -s "$(pwd)/bin/deepseek-balance" ~/.local/bin/deepseek-balance
+ln -s "$(pwd)/bin/deepseek-balance-poll" ~/.local/bin/deepseek-balance-poll
+
+# Optional: keep the timer running when logged out
 loginctl enable-linger
 ```
 
-Done. It's recording. Check with:
+Done. Watch it record:
 
 ```bash
 journalctl --user -u deepseek-balance.service -f
 ```
 
-## Query
+## Usage
 
 ```bash
-./bin/query-balance current       # latest balance
-./bin/query-balance today         # how much you spent today
-./bin/query-balance history 10    # last 10 snapshots
-./bin/query-balance summary       # 7d/30d averages, days remaining
+deepseek-balance current       # latest balance
+deepseek-balance today         # how much you spent today
+deepseek-balance history 10    # last 10 snapshots
+deepseek-balance summary       # averages, projection
 ```
 
-All output is JSON. Pipe to `jq`:
+Output is human-readable by default:
+
+```
+$ deepseek-balance current
+USD  $4.16     total  $0.00     granted  $4.16     topped-up  (2026-06-19 06:41 UTC)
+
+$ deepseek-balance today
+USD  spent $0.06 today  (9 snapshots)
+
+$ deepseek-balance history 3
+CUR  BALANCE  RECORDED AT
+USD  $4.16    2026-06-19 06:41:56
+USD  $4.17    2026-06-19 06:41:02
+USD  $4.18    2026-06-19 06:38:02
+
+$ deepseek-balance summary
+USD  balance $4.16  avg $0.02/day (7d)  $0.01/day (30d)  ~347 days left  (1 day tracked)
+```
+
+Add `-j` for JSON (scripts, bots, piping to `jq`):
 
 ```bash
-./bin/query-balance -c USD current | jq '.[0].topped_up_balance'
-# → 4.21
-
-./bin/query-balance -c USD today | jq '.USD.spend_today'
-# → 0.05
-
-./bin/query-balance -c USD summary | jq '.USD.estimated_days_left'
-# → 84
+deepseek-balance -j current | jq '.[0].topped_up_balance'
+deepseek-balance -j today | jq '.USD.spend_today'
+deepseek-balance -j summary | jq '.USD.estimated_days_left'
 ```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `deepseek-balance current` | Latest balance per currency |
+| `deepseek-balance today` | Total spend today (UTC) |
+| `deepseek-balance history [N]` | Last N snapshots (default 24) |
+| `deepseek-balance summary` | 7d/30d averages, days remaining |
+| `deepseek-balance-poll` | Fetch from API and record (called by timer) |
+
+Flags: `-c USD|CNY` (currency), `-j` (JSON output), `-h` (help).
 
 ## How it works
 
@@ -64,18 +94,18 @@ All output is JSON. Pipe to `jq`:
 systemd timer (every 5 min)
        │
        ▼
-  poll-balance ──curl──▶ DeepSeek API /user/balance
+  deepseek-balance-poll ──curl──▶ DeepSeek API /user/balance
        │
        ▼
   SQLite DB (~/.local/share/deepseek-balance-tracker/balance.db)
        │
        ▼
-  query-balance ◀── any script, bot, or status bar
+  deepseek-balance ◀── any script, bot, or status bar
 ```
 
 - **Spending** = decrease in `topped_up_balance` between snapshots. Balance increases (top-ups) are ignored.
 - **Currency** = `USD`, `CNY`, or `both` — set `CURRENCY` in your secrets file.
-- **Interval** = edit `OnCalendar` in the timer file to change it (default: every 5 min).
+- **Interval** = edit `OnCalendar` in the timer file (default: every 5 min).
 
 ## Adjust the polling interval
 
@@ -98,14 +128,15 @@ Then `systemctl --user daemon-reload && systemctl --user restart deepseek-balanc
 
 | What | Where |
 |---|---|
-| Scripts | `bin/poll-balance`, `bin/query-balance` |
+| Query tool | `bin/deepseek-balance` |
+| Poll script | `bin/deepseek-balance-poll` |
 | systemd units | `etc/deepseek-balance.service`, `etc/deepseek-balance.timer` |
 | Your API key | `~/.config/deepseek-balance/secrets.env` |
 | SQLite DB | `~/.local/share/deepseek-balance-tracker/balance.db` |
 
 ## Database
 
-All monetary values are stored as **integer cents** to avoid floating-point issues.
+All monetary values are stored as **integer cents**.
 
 ```bash
 sqlite3 ~/.local/share/deepseek-balance-tracker/balance.db \

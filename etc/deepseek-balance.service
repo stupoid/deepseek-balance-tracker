@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=%h/.config/deepseek-balance/secrets.env
 Environment=PATH=/run/current-system/sw/bin:%h/.nix-profile/bin:/etc/profiles/per-user/%U/bin
-ExecStart=%h/code/deepseek-balance-tracker/bin/poll-balance
+ExecStart=%h/code/deepseek-balance-tracker/bin/deepseek-balance-poll
 
 StandardOutput=journal
 StandardError=journal

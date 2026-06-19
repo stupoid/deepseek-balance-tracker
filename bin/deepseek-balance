@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DB_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/deepseek-balance-tracker/balance.db"
+OUTPUT_MODE="text"
+
+usage() {
+    cat <<'EOF'
+Usage: deepseek-balance [-j] <subcommand> [args]
+
+Query your DeepSeek account balance and usage from local SQLite history.
+
+Subcommands:
+  current        Latest balance
+  today          Total spend today (UTC)
+  history [N]    Last N snapshots (default 24)
+  summary        Averages, projection, days tracked
+
+Options:
+  -c USD|CNY     Currency filter (default: from $CURRENCY env, or 'both')
+  -j             JSON output (default: human-readable text)
+  -h             Show this help
+EOF
+    exit 0
+}
+
+# --- Parse options ---------------------------------------------------------
+CURRENCY="${CURRENCY:-both}"
+while getopts "c:jh" opt; do
+    case "$opt" in
+        c) CURRENCY="$OPTARG" ;;
+        j) OUTPUT_MODE="json" ;;
+        h) usage ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+SUBCMD="${1:-}"
+N="${2:-24}"
+
+if [ -z "$SUBCMD" ]; then usage; fi
+if [ ! -f "$DB_FILE" ]; then
+    echo "deepseek-balance: no data yet — run deepseek-balance-poll first" >&2
+    exit 1
+fi
+
+# --- Helpers ---------------------------------------------------------------
+get_currencies() {
+    if [ "$CURRENCY" = "both" ]; then
+        sqlite3 "$DB_FILE" "SELECT DISTINCT currency FROM balance_snapshots ORDER BY currency;"
+    else
+        echo "$CURRENCY"
+    fi
+}
+
+cents_to_dollars() {
+    awk -v c="$1" 'BEGIN { printf "%.2f", c / 100.0 }'
+}
+
+# --- JSON output functions (reuse existing JSON logic) ---------------------
+json_balance_row() {
+    local c="$1" tc="$2" gc="$3" pc="$4" ts="$5"
+    printf '{"currency":"%s","total_balance":%s,"granted_balance":%s,"topped_up_balance":%s,"recorded_at":"%s"}' \
+        "$c" "$(cents_to_dollars "$tc")" "$(cents_to_dollars "$gc")" "$(cents_to_dollars "$pc")" "$ts"
+}
+
+json_current() {
+    local where="WHERE id IN (SELECT MAX(id) FROM balance_snapshots GROUP BY currency)"
+    [ "$CURRENCY" != "both" ] && where="WHERE currency = '$CURRENCY'"
+    echo "["
+    local first=1
+    while IFS='|' read -r c tc gc pc ts; do
+        [ "$first" = 1 ] || echo ","
+        first=0
+        json_balance_row "$c" "$tc" "$gc" "$pc" "$ts"
+    done < <(sqlite3 -separator '|' "$DB_FILE" \
+        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,recorded_at
+         FROM balance_snapshots $where ORDER BY currency;")
+    echo ""
+    echo "]"
+}
+
+json_today() {
+    echo "{"
+    local first=1
+    for CUR in $(get_currencies); do
+        [ "$first" = 1 ] || echo ","
+        first=0
+        local sc rc
+        sc=$(sqlite3 "$DB_FILE" "
+            WITH ordered AS (
+                SELECT topped_up_balance_cents,
+                       LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+                FROM balance_snapshots
+                WHERE currency = '$CUR' AND date(recorded_at) = date('now')
+            )
+            SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
+            FROM ordered WHERE prev IS NOT NULL;")
+        rc=$(sqlite3 "$DB_FILE" \
+            "SELECT COUNT(*) FROM balance_snapshots
+             WHERE currency = '$CUR' AND date(recorded_at) = date('now');")
+        printf '  "%s": {"spend_today": %s, "snapshots_today": %s}' \
+            "$CUR" "$(cents_to_dollars "$sc")" "$rc"
+    done
+    echo ""
+    echo "}"
+}
+
+json_history() {
+    local where=""
+    [ "$CURRENCY" != "both" ] && where="WHERE currency = '$CURRENCY'"
+    echo "["
+    local first=1
+    while IFS='|' read -r c tc gc pc ts; do
+        [ "$first" = 1 ] || echo ","
+        first=0
+        json_balance_row "$c" "$tc" "$gc" "$pc" "$ts"
+    done < <(sqlite3 -separator '|' "$DB_FILE" \
+        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,recorded_at
+         FROM balance_snapshots $where ORDER BY id DESC LIMIT $N;")
+    echo ""
+    echo "]"
+}
+
+json_summary() {
+    echo "{"
+    local first=1
+    for CUR in $(get_currencies); do
+        [ "$first" = 1 ] || echo ","
+        first=0
+        local cc dt
+        cc=$(sqlite3 "$DB_FILE" \
+            "SELECT topped_up_balance_cents FROM balance_snapshots
+             WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
+        dt=$(sqlite3 "$DB_FILE" \
+            "SELECT COUNT(DISTINCT date(recorded_at))
+             FROM balance_snapshots WHERE currency = '$CUR';")
+        avg() {
+            sqlite3 "$DB_FILE" "
+                WITH consecutive AS (
+                    SELECT date(recorded_at) AS day,
+                           topped_up_balance_cents,
+                           LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+                    FROM balance_snapshots
+                    WHERE currency = '$CUR'
+                      AND date(recorded_at) >= date('now', '-$1 days')
+                      AND date(recorded_at) < date('now')
+                ),
+                daily_spend AS (
+                    SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend
+                    FROM consecutive WHERE prev IS NOT NULL GROUP BY day
+                )
+                SELECT COALESCE(ROUND(AVG(spend)), 0)
+                FROM daily_spend WHERE spend > 0;"
+        }
+        local a7 a30
+        a7=$(avg 7); a30=$(avg 30)
+        local ed="null"
+        [ "$a30" != "0" ] && ed=$(awk -v b="$cc" -v a="$a30" 'BEGIN { printf "%d", b / a }')
+        printf '  "%s": {' "$CUR"
+        printf '"current_balance": %s, ' "$(cents_to_dollars "$cc")"
+        printf '"avg_daily_spend_7d": %s, ' "$(cents_to_dollars "$a7")"
+        printf '"avg_daily_spend_30d": %s, ' "$(cents_to_dollars "$a30")"
+        printf '"days_tracked": %s, ' "$dt"
+        printf '"estimated_days_left": %s' "$ed"
+        echo -n "}"
+    done
+    echo ""
+    echo "}"
+}
+
+# --- Text output functions -------------------------------------------------
+
+text_current() {
+    local where="WHERE id IN (SELECT MAX(id) FROM balance_snapshots GROUP BY currency)"
+    [ "$CURRENCY" != "both" ] && where="WHERE currency = '$CURRENCY'"
+    while IFS='|' read -r c tc gc pc ts; do
+        printf "%-4s \$%-8s total  \$%-8s granted  \$%-8s topped-up  (%s)\n" \
+            "$c" "$(cents_to_dollars "$tc")" "$(cents_to_dollars "$gc")" "$(cents_to_dollars "$pc")" "$ts"
+    done < <(sqlite3 -separator '|' "$DB_FILE" \
+        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,recorded_at
+         FROM balance_snapshots $where ORDER BY currency;")
+}
+
+text_today() {
+    for CUR in $(get_currencies); do
+        local sc rc
+        sc=$(sqlite3 "$DB_FILE" "
+            WITH ordered AS (
+                SELECT topped_up_balance_cents,
+                       LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+                FROM balance_snapshots
+                WHERE currency = '$CUR' AND date(recorded_at) = date('now')
+            )
+            SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
+            FROM ordered WHERE prev IS NOT NULL;")
+        rc=$(sqlite3 "$DB_FILE" \
+            "SELECT COUNT(*) FROM balance_snapshots
+             WHERE currency = '$CUR' AND date(recorded_at) = date('now');")
+        printf "%-4s spent \$%s today  (%s snapshots)\n" \
+            "$CUR" "$(cents_to_dollars "$sc")" "$rc"
+    done
+}
+
+text_history() {
+    local where=""
+    [ "$CURRENCY" != "both" ] && where="WHERE currency = '$CURRENCY'"
+    printf "%-4s %-8s %s\n" "CUR" "BALANCE" "RECORDED AT"
+    while IFS='|' read -r c _ _ pc ts; do
+        printf "%-4s \$%-8s %s\n" "$c" "$(cents_to_dollars "$pc")" "$ts"
+    done < <(sqlite3 -separator '|' "$DB_FILE" \
+        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,recorded_at
+         FROM balance_snapshots $where ORDER BY id DESC LIMIT $N;")
+}
+
+text_summary() {
+    for CUR in $(get_currencies); do
+        local cc dt
+        cc=$(sqlite3 "$DB_FILE" \
+            "SELECT topped_up_balance_cents FROM balance_snapshots
+             WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
+        dt=$(sqlite3 "$DB_FILE" \
+            "SELECT COUNT(DISTINCT date(recorded_at))
+             FROM balance_snapshots WHERE currency = '$CUR';")
+        avg() {
+            sqlite3 "$DB_FILE" "
+                WITH consecutive AS (
+                    SELECT date(recorded_at) AS day,
+                           topped_up_balance_cents,
+                           LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+                    FROM balance_snapshots
+                    WHERE currency = '$CUR'
+                      AND date(recorded_at) >= date('now', '-$1 days')
+                      AND date(recorded_at) < date('now')
+                ),
+                daily_spend AS (
+                    SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend
+                    FROM consecutive WHERE prev IS NOT NULL GROUP BY day
+                )
+                SELECT COALESCE(ROUND(AVG(spend)), 0)
+                FROM daily_spend WHERE spend > 0;"
+        }
+        local a7 a30
+        a7=$(avg 7); a30=$(avg 30)
+        printf "%-4s balance \$%s  avg \$%s/day (7d)  \$%s/day (30d)" \
+            "$CUR" "$(cents_to_dollars "$cc")" "$(cents_to_dollars "$a7")" "$(cents_to_dollars "$a30")"
+        if [ "$a30" != "0" ]; then
+            local ed
+            ed=$(awk -v b="$cc" -v a="$a30" 'BEGIN { printf "%d", b / a }')
+            printf "  ~%s days left" "$ed"
+        fi
+        printf "  (%s days tracked)\n" "$dt"
+    done
+}
+
+# --- Dispatch --------------------------------------------------------------
+case "$SUBCMD" in
+    current)
+        [ "$OUTPUT_MODE" = "json" ] && json_current || text_current ;;
+    today)
+        [ "$OUTPUT_MODE" = "json" ] && json_today || text_today ;;
+    history)
+        [ "$OUTPUT_MODE" = "json" ] && json_history || text_history ;;
+    summary)
+        [ "$OUTPUT_MODE" = "json" ] && json_summary || text_summary ;;
+    *)  echo "deepseek-balance: unknown subcommand '$SUBCMD'" >&2; exit 2 ;;
+esac
