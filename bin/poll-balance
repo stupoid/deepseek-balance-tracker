@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- Config ----------------------------------------------------------------
+: "${CURRENCY:=both}"
+DB_DIR="/var/lib/deepseek-balance-tracker"
+DB_FILE="$DB_DIR/balance.db"
+
+# --- API key ---------------------------------------------------------------
+if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+    if [ -f /etc/deepseek-balance/secrets.env ]; then
+        # shellcheck source=/dev/null
+        source /etc/deepseek-balance/secrets.env
+    fi
+fi
+
+if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+    echo "ERROR: DEEPSEEK_API_KEY is not set. Set it in the environment or in /etc/deepseek-balance/secrets.env" >&2
+    exit 1
+fi
+
+# --- Ensure DB dir exists --------------------------------------------------
+mkdir -p "$DB_DIR"
+
+# --- Fetch balance from API ------------------------------------------------
+RESPONSE=$(curl -s -w '\n%{http_code}' \
+    -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+    https://api.deepseek.com/user/balance)
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" != "200" ]; then
+    echo "ERROR: API returned HTTP $HTTP_CODE: $BODY" >&2
+    exit 2
+fi
+
+# --- Create table if not exists --------------------------------------------
+sqlite3 "$DB_FILE" <<'SQL'
+CREATE TABLE IF NOT EXISTS balance_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    currency TEXT NOT NULL,
+    total_balance REAL NOT NULL,
+    granted_balance REAL NOT NULL,
+    topped_up_balance REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_currency_time
+    ON balance_snapshots(currency, recorded_at);
+SQL
+
+# --- Parse and insert ------------------------------------------------------
+# Build a jq filter: if CURRENCY=both, keep all; else select only that currency
+if [ "$CURRENCY" = "both" ]; then
+    JQ_FILTER='.balance_infos[]'
+else
+    JQ_FILTER=".balance_infos[] | select(.currency == \"$CURRENCY\")"
+fi
+
+INSERTED=0
+while IFS='|' read -r currency total granted topped; do
+    sqlite3 "$DB_FILE" \
+        "INSERT INTO balance_snapshots (currency, total_balance, granted_balance, topped_up_balance)
+         VALUES ('$currency', $total, $granted, $topped);"
+    INSERTED=$((INSERTED + 1))
+done < <(echo "$BODY" | jq -r "$JQ_FILTER | \"\(.currency)|\(.total_balance)|\(.granted_balance)|\(.topped_up_balance)\"")
+
+if [ "$INSERTED" -eq 0 ]; then
+    echo "WARNING: No balance rows inserted (CURRENCY=$CURRENCY). API response: $BODY" >&2
+    exit 3
+fi
+
+echo "OK: inserted $INSERTED balance snapshot(s) (CURRENCY=$CURRENCY)"

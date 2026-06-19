@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DB_FILE="/var/lib/deepseek-balance-tracker/balance.db"
+
+usage() {
+    cat <<'EOF'
+Usage: query-balance [OPTIONS] <subcommand> [args]
+
+Subcommands:
+  current        Latest balance per currency
+  today          Total spend today (UTC)
+  history [N]    Last N snapshots (default 24)
+  summary        Weekly/monthly stats + projection
+
+Options:
+  -c USD|CNY     Override currency (default: from $CURRENCY env, or 'both')
+  -h             Show this help
+
+Output: JSON
+EOF
+    exit 0
+}
+
+# --- Parse options ---------------------------------------------------------
+CURRENCY="${CURRENCY:-both}"
+while getopts "c:h" opt; do
+    case "$opt" in
+        c) CURRENCY="$OPTARG" ;;
+        h) usage ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+SUBCMD="${1:-}"
+N="${2:-24}"
+
+if [ -z "$SUBCMD" ]; then
+    usage
+fi
+
+if [ ! -f "$DB_FILE" ]; then
+    echo '{"error":"No data yet. Run poll-balance first."}'
+    exit 1
+fi
+
+# --- Helpers ---------------------------------------------------------------
+get_currencies() {
+    if [ "$CURRENCY" = "both" ]; then
+        sqlite3 "$DB_FILE" "SELECT DISTINCT currency FROM balance_snapshots ORDER BY currency;"
+    else
+        echo "$CURRENCY"
+    fi
+}
+
+# --- Subcommands -----------------------------------------------------------
+
+cmd_current() {
+    if [ "$CURRENCY" = "both" ]; then
+        sqlite3 -json "$DB_FILE" \
+            "SELECT currency, total_balance, granted_balance, topped_up_balance, recorded_at
+             FROM balance_snapshots
+             WHERE id IN (SELECT MAX(id) FROM balance_snapshots GROUP BY currency)
+             ORDER BY currency;"
+    else
+        sqlite3 -json "$DB_FILE" \
+            "SELECT currency, total_balance, granted_balance, topped_up_balance, recorded_at
+             FROM balance_snapshots
+             WHERE currency = '$CURRENCY'
+             ORDER BY id DESC LIMIT 1;"
+    fi
+}
+
+cmd_today() {
+    echo "{"
+    local first=1
+    for CUR in $(get_currencies); do
+        [ "$first" = 1 ] || echo ","
+        first=0
+
+        # Sum of positive deltas (prev - curr) across today's snapshots.
+        # Negative deltas = top-up, ignored.
+        SPEND=$(sqlite3 "$DB_FILE" "
+            WITH ordered AS (
+                SELECT topped_up_balance,
+                       LAG(topped_up_balance) OVER (ORDER BY id) AS prev
+                FROM balance_snapshots
+                WHERE currency = '$CUR'
+                  AND date(recorded_at) = date('now')
+            )
+            SELECT COALESCE(SUM(MAX(prev - topped_up_balance, 0)), 0)
+            FROM ordered
+            WHERE prev IS NOT NULL;
+        ")
+
+        ROW_COUNT=$(sqlite3 "$DB_FILE" \
+            "SELECT COUNT(*) FROM balance_snapshots
+             WHERE currency = '$CUR' AND date(recorded_at) = date('now');")
+
+        printf '  "%s": {"spend_today": %s, "snapshots_today": %s}' \
+            "$CUR" "$SPEND" "$ROW_COUNT"
+    done
+    echo ""
+    echo "}"
+}
+
+cmd_history() {
+    if [ "$CURRENCY" = "both" ]; then
+        sqlite3 -json "$DB_FILE" \
+            "SELECT currency, total_balance, granted_balance, topped_up_balance, recorded_at
+             FROM balance_snapshots
+             ORDER BY id DESC
+             LIMIT $N;"
+    else
+        sqlite3 -json "$DB_FILE" \
+            "SELECT currency, total_balance, granted_balance, topped_up_balance, recorded_at
+             FROM balance_snapshots
+             WHERE currency = '$CURRENCY'
+             ORDER BY id DESC
+             LIMIT $N;"
+    fi
+}
+
+cmd_summary() {
+    echo "{"
+    local first=1
+    for CUR in $(get_currencies); do
+        [ "$first" = 1 ] || echo ","
+        first=0
+
+        # Current topped-up balance
+        CURRENT=$(sqlite3 "$DB_FILE" \
+            "SELECT topped_up_balance FROM balance_snapshots
+             WHERE currency = '$CUR'
+             ORDER BY id DESC LIMIT 1;")
+
+        # Days tracked
+        DAYS_TRACKED=$(sqlite3 "$DB_FILE" \
+            "SELECT COUNT(DISTINCT date(recorded_at))
+             FROM balance_snapshots WHERE currency = '$CUR';")
+
+        # 7-day avg daily spend: compute per-day spend from consecutive deltas,
+        # then average across days that had spend > 0.
+        AVG_7D=$(sqlite3 "$DB_FILE" "
+            WITH consecutive AS (
+                SELECT date(recorded_at) AS day,
+                       topped_up_balance,
+                       LAG(topped_up_balance) OVER (ORDER BY id) AS prev
+                FROM balance_snapshots
+                WHERE currency = '$CUR'
+                  AND date(recorded_at) >= date('now', '-7 days')
+                  AND date(recorded_at) < date('now')
+            ),
+            daily_spend AS (
+                SELECT day, SUM(MAX(prev - topped_up_balance, 0)) AS spend
+                FROM consecutive
+                WHERE prev IS NOT NULL
+                GROUP BY day
+            )
+            SELECT COALESCE(ROUND(AVG(spend), 2), 0)
+            FROM daily_spend
+            WHERE spend > 0;
+        ")
+
+        # 30-day avg daily spend
+        AVG_30D=$(sqlite3 "$DB_FILE" "
+            WITH consecutive AS (
+                SELECT date(recorded_at) AS day,
+                       topped_up_balance,
+                       LAG(topped_up_balance) OVER (ORDER BY id) AS prev
+                FROM balance_snapshots
+                WHERE currency = '$CUR'
+                  AND date(recorded_at) >= date('now', '-30 days')
+                  AND date(recorded_at) < date('now')
+            ),
+            daily_spend AS (
+                SELECT day, SUM(MAX(prev - topped_up_balance, 0)) AS spend
+                FROM consecutive
+                WHERE prev IS NOT NULL
+                GROUP BY day
+            )
+            SELECT COALESCE(ROUND(AVG(spend), 2), 0)
+            FROM daily_spend
+            WHERE spend > 0;
+        ")
+
+        # Estimated days remaining (based on 30d avg)
+        EST_DAYS="null"
+        if [ "$AVG_30D" != "0" ] && [ "$AVG_30D" != "0.00" ]; then
+            EST_DAYS=$(awk -v bal="$CURRENT" -v avg="$AVG_30D" \
+                'BEGIN { printf "%d", bal / avg }' 2>/dev/null || echo "null")
+            if [ -z "$EST_DAYS" ]; then
+                EST_DAYS="null"
+            fi
+        fi
+
+        printf '  "%s": {' "$CUR"
+        printf '"current_balance": %s, ' "$CURRENT"
+        printf '"avg_daily_spend_7d": %s, ' "$AVG_7D"
+        printf '"avg_daily_spend_30d": %s, ' "$AVG_30D"
+        printf '"days_tracked": %s, ' "$DAYS_TRACKED"
+        printf '"estimated_days_left": %s' "$EST_DAYS"
+        echo -n "}"
+    done
+    echo ""
+    echo "}"
+}
+
+# --- Dispatch --------------------------------------------------------------
+case "$SUBCMD" in
+    current) cmd_current ;;
+    today)   cmd_today ;;
+    history) cmd_history ;;
+    summary) cmd_summary ;;
+    *)       echo "{\"error\":\"Unknown subcommand: $SUBCMD\"}" >&2; exit 2 ;;
+esac

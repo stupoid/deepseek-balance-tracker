@@ -1,0 +1,5 @@
+# Secrets (contains real API key)
+secrets.env
+
+# SQLite database files
+*.db
