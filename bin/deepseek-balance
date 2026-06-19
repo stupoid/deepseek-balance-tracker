@@ -97,7 +97,7 @@ json_current() {
         first=0
         json_balance_row "$c" "$tc" "$gc" "$pc" "$ts"
     done < <(sqlite3 -separator '|' "$DB_FILE" \
-        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,recorded_at
+        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,datetime(recorded_at, 'unixepoch') AS recorded_at
          FROM balance_snapshots $where ORDER BY currency;")
     echo ""
     echo "]"
@@ -115,13 +115,13 @@ json_today() {
                 SELECT topped_up_balance_cents,
                        LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
                 FROM balance_snapshots
-                WHERE currency = '$CUR' AND date(recorded_at) = date('now')
+                WHERE currency = '$CUR' AND date(recorded_at, 'unixepoch') = date('now')
             )
             SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
             FROM ordered WHERE prev IS NOT NULL;")
         rc=$(sqlite3 "$DB_FILE" \
             "SELECT COUNT(*) FROM balance_snapshots
-             WHERE currency = '$CUR' AND date(recorded_at) = date('now');")
+             WHERE currency = '$CUR' AND date(recorded_at, 'unixepoch') = date('now');")
         printf '  "%s": {"spend_today": %s, "snapshots_today": %s}' \
             "$CUR" "$(cents_to_dollars "$sc")" "$rc"
     done
@@ -139,7 +139,7 @@ json_history() {
         first=0
         json_balance_row "$c" "$tc" "$gc" "$pc" "$ts"
     done < <(sqlite3 -separator '|' "$DB_FILE" \
-        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,recorded_at
+        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,datetime(recorded_at, 'unixepoch') AS recorded_at
          FROM balance_snapshots $where ORDER BY id DESC LIMIT $N;")
     echo ""
     echo "]"
@@ -156,18 +156,18 @@ json_summary() {
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
         dt=$(sqlite3 "$DB_FILE" \
-            "SELECT COUNT(DISTINCT date(recorded_at))
+            "SELECT COUNT(DISTINCT date(recorded_at, 'unixepoch'))
              FROM balance_snapshots WHERE currency = '$CUR';")
         avg() {
             sqlite3 "$DB_FILE" "
                 WITH consecutive AS (
-                    SELECT date(recorded_at) AS day,
+                    SELECT date(recorded_at, 'unixepoch') AS day,
                            topped_up_balance_cents,
                            LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
                     FROM balance_snapshots
                     WHERE currency = '$CUR'
-                      AND date(recorded_at) >= date('now', '-$1 days')
-                      AND date(recorded_at) < date('now')
+                      AND date(recorded_at, 'unixepoch') >= date('now', '-$1 days')
+                      AND date(recorded_at, 'unixepoch') < date('now')
                 ),
                 daily_spend AS (
                     SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend
@@ -201,7 +201,7 @@ text_current() {
         printf "%-4s \$%-8s total  \$%-8s granted  \$%-8s topped-up  (%s)\n" \
             "$c" "$(cents_to_dollars "$tc")" "$(cents_to_dollars "$gc")" "$(cents_to_dollars "$pc")" "$ts"
     done < <(sqlite3 -separator '|' "$DB_FILE" \
-        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,recorded_at
+        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,datetime(recorded_at, 'unixepoch') AS recorded_at
          FROM balance_snapshots $where ORDER BY currency;")
 }
 
@@ -213,13 +213,13 @@ text_today() {
                 SELECT topped_up_balance_cents,
                        LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
                 FROM balance_snapshots
-                WHERE currency = '$CUR' AND date(recorded_at) = date('now')
+                WHERE currency = '$CUR' AND date(recorded_at, 'unixepoch') = date('now')
             )
             SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
             FROM ordered WHERE prev IS NOT NULL;")
         rc=$(sqlite3 "$DB_FILE" \
             "SELECT COUNT(*) FROM balance_snapshots
-             WHERE currency = '$CUR' AND date(recorded_at) = date('now');")
+             WHERE currency = '$CUR' AND date(recorded_at, 'unixepoch') = date('now');")
         printf "%-4s spent \$%s today  (%s snapshots)\n" \
             "$CUR" "$(cents_to_dollars "$sc")" "$rc"
     done
@@ -232,7 +232,7 @@ text_history() {
     while IFS='|' read -r c _ _ pc ts; do
         printf "%-4s \$%-8s %s\n" "$c" "$(cents_to_dollars "$pc")" "$ts"
     done < <(sqlite3 -separator '|' "$DB_FILE" \
-        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,recorded_at
+        "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,datetime(recorded_at, 'unixepoch') AS recorded_at
          FROM balance_snapshots $where ORDER BY id DESC LIMIT $N;")
 }
 
@@ -243,18 +243,18 @@ text_summary() {
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
         dt=$(sqlite3 "$DB_FILE" \
-            "SELECT COUNT(DISTINCT date(recorded_at))
+            "SELECT COUNT(DISTINCT date(recorded_at, 'unixepoch'))
              FROM balance_snapshots WHERE currency = '$CUR';")
         avg() {
             sqlite3 "$DB_FILE" "
                 WITH consecutive AS (
-                    SELECT date(recorded_at) AS day,
+                    SELECT date(recorded_at, 'unixepoch') AS day,
                            topped_up_balance_cents,
                            LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
                     FROM balance_snapshots
                     WHERE currency = '$CUR'
-                      AND date(recorded_at) >= date('now', '-$1 days')
-                      AND date(recorded_at) < date('now')
+                      AND date(recorded_at, 'unixepoch') >= date('now', '-$1 days')
+                      AND date(recorded_at, 'unixepoch') < date('now')
                 ),
                 daily_spend AS (
                     SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend

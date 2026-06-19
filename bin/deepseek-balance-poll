@@ -63,7 +63,7 @@ fi
 sqlite3 "$DB_FILE" <<'SQL'
 CREATE TABLE IF NOT EXISTS balance_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    recorded_at INTEGER NOT NULL DEFAULT (unixepoch()),
     currency TEXT NOT NULL,
     total_balance_cents INTEGER NOT NULL,
     granted_balance_cents INTEGER NOT NULL,
