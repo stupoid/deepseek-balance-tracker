@@ -136,7 +136,16 @@ Then `systemctl --user daemon-reload && systemctl --user restart deepseek-balanc
 
 ## Database
 
-All monetary values are stored as **integer cents**.
+All monetary values are stored as **integer cents**. At 5-minute intervals (~288 rows/day), each row is ~75 bytes.
+
+| Retention | Rows | Approx size |
+|---|---|---|
+| 30 days | ~8,600 | ~650 KB |
+| 90 days (default) | ~26,000 | ~2 MB |
+| 1 year | ~105,000 | ~8 MB |
+| Forever (set `RETENTION_DAYS=0`) | grows ~8 MB/year | — |
+
+Old snapshots are auto-pruned on each poll. Set `RETENTION_DAYS` in your secrets file.
 
 ```bash
 sqlite3 ~/.local/share/deepseek-balance-tracker/balance.db \

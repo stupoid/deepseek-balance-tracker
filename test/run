@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# DeepSeek Balance Tracker — test suite
+# Run: ./test/run
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+BIN="$PROJECT_DIR/bin/deepseek-balance"
+
+PASS=0
+FAIL=0
+
+TMPDIR=$(mktemp -d /tmp/deepseek-balance-test.XXXXXX)
+export XDG_DATA_HOME="$TMPDIR"
+DB_DIR="$XDG_DATA_HOME/deepseek-balance-tracker"
+DB_FILE="$DB_DIR/balance.db"
+mkdir -p "$DB_DIR"
+
+cleanup() { rm -rf "$TMPDIR"; }
+trap cleanup EXIT
+
+# --- Helpers ---------------------------------------------------------------
+
+setup_db() {
+    # Start completely fresh each time — drop and recreate the DB.
+    rm -f "$DB_FILE"
+    sqlite3 "$DB_FILE" <<'SQL'
+CREATE TABLE balance_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    currency TEXT NOT NULL,
+    total_balance_cents INTEGER NOT NULL,
+    granted_balance_cents INTEGER NOT NULL,
+    topped_up_balance_cents INTEGER NOT NULL
+);
+SQL
+}
+
+insert_row() {
+    # Args: currency total_cents granted_cents topped_up_cents recorded_at
+    sqlite3 "$DB_FILE" \
+        "INSERT INTO balance_snapshots (currency, total_balance_cents, granted_balance_cents, topped_up_balance_cents, recorded_at)
+         VALUES ('$1', $2, $3, $4, '$5');"
+}
+
+assert_contains() {
+    local label="$1" output="$2" pattern="$3"
+    if echo "$output" | grep -qF "$pattern"; then
+        echo "  PASS $label"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL $label"
+        echo "    Expected to contain: $pattern"
+        echo "    Actual: $output"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+assert_not_contains() {
+    local label="$1" output="$2" pattern="$3"
+    if ! echo "$output" | grep -qF "$pattern"; then
+        echo "  PASS $label"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL $label"
+        echo "    Expected NOT to contain: $pattern"
+        echo "    Actual: $output"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+assert_json_key() {
+    local label="$1" json="$2" jq_filter="$3" expected="$4"
+    local actual
+    actual=$(echo "$json" | jq -r "$jq_filter" 2>/dev/null || echo "JQ_ERROR")
+    if [ "$actual" = "$expected" ]; then
+        echo "  PASS $label"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL $label"
+        echo "    JQ filter: $jq_filter"
+        echo "    Expected:  $expected"
+        echo "    Actual:    $actual"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+run_query() {
+    # Run deepseek-balance with optional flags, capture stdout
+    "$BIN" "$@"
+}
+
+# --- Tests: empty DB -------------------------------------------------------
+
+echo "=== Empty DB ==="
+setup_db
+OUT=$(run_query current 2>&1 || true)
+# Empty DB with valid table — command succeeds with no output
+assert_not_contains "empty DB no error" "$OUT" "ERROR"
+# The 'no data yet' check only fires when DB file is missing
+rm -f "$DB_FILE"
+OUT=$(run_query current 2>&1 || true)
+assert_contains "missing DB file error" "$OUT" "no data yet"
+
+# --- Tests: single snapshot ------------------------------------------------
+
+echo "=== Single snapshot ==="
+setup_db
+insert_row "USD" 426 0 426 "2026-06-19 10:00:00"
+
+OUT=$(run_query current)
+assert_contains "current shows balance" "$OUT" "\$4.26"
+assert_contains "current shows currency" "$OUT" "USD"
+
+OUT=$(run_query today)
+assert_contains "today shows zero spend" "$OUT" "spent \$0.00"
+
+OUT=$(run_query -j current)
+assert_json_key "json current balance" "$OUT" '.[0].total_balance' "4.26"
+assert_json_key "json current currency" "$OUT" '.[0].currency' 'USD'
+
+# --- Tests: multiple snapshots with spend ----------------------------------
+
+echo "=== Multiple snapshots ==="
+setup_db
+# Day 1: balance $5.00 → $4.50 (spent $0.50), then top-up to $6.00
+insert_row "USD" 500 0 500 "2026-06-19 08:00:00"
+insert_row "USD" 450 0 450 "2026-06-19 08:05:00"
+insert_row "USD" 600 0 600 "2026-06-19 08:10:00"  # top-up
+# Day 1 continued: $6.00 → $5.75 (spent $0.25)
+insert_row "USD" 575 0 575 "2026-06-19 08:15:00"
+
+OUT=$(run_query today)
+assert_contains "today detects spend correctly" "$OUT" "spent \$0.75"
+assert_contains "today shows snapshot count" "$OUT" "snapshots"
+
+OUT=$(run_query -j today)
+assert_json_key "json today spend" "$OUT" '.USD.spend_today' "0.75"
+assert_json_key "json today count" "$OUT" '.USD.snapshots_today' "4"
+
+# --- Tests: history --------------------------------------------------------
+
+echo "=== History ==="
+OUT=$(run_query history 2)
+assert_contains "history shows latest first" "$OUT" "\$5.75"
+assert_not_contains "history limits rows" "$OUT" "\$5.00"
+
+OUT=$(run_query -j history 2)
+assert_json_key "json history count" "$OUT" 'length' "2"
+
+# --- Tests: currency filtering ---------------------------------------------
+
+echo "=== Currency filtering ==="
+setup_db
+insert_row "USD" 100 0 100 "2026-06-19 10:00:00"
+insert_row "CNY" 5000 0 5000 "2026-06-19 10:00:00"
+
+OUT=$(run_query -c USD current)
+assert_contains "filter USD only" "$OUT" "USD"
+assert_not_contains "filter USD excludes CNY" "$OUT" "CNY"
+
+OUT=$(run_query -c CNY current)
+assert_contains "filter CNY only" "$OUT" "CNY"
+assert_not_contains "filter CNY excludes USD" "$OUT" "USD"
+
+OUT=$(run_query -c both current)
+assert_contains "both includes USD" "$OUT" "USD"
+assert_contains "both includes CNY" "$OUT" "CNY"
+
+# --- Tests: multi-day summary ----------------------------------------------
+
+echo "=== Summary ==="
+setup_db
+# Insert data across 5 days with known spend pattern
+# Day -4: $10.00 → $9.00 (spent $1.00)
+insert_row "USD" 1000 0 1000 "$(date -d '4 days ago' +'%Y-%m-%d 10:00:00')"
+insert_row "USD" 950 0 950   "$(date -d '4 days ago' +'%Y-%m-%d 10:05:00')"
+insert_row "USD" 900 0 900   "$(date -d '4 days ago' +'%Y-%m-%d 10:10:00')"
+# Day -3: $9.00 → $8.00 (spent $1.00)
+insert_row "USD" 900 0 900   "$(date -d '3 days ago' +'%Y-%m-%d 10:00:00')"
+insert_row "USD" 800 0 800   "$(date -d '3 days ago' +'%Y-%m-%d 10:05:00')"
+# Day -2: $8.00 → $7.50 (spent $0.50)
+insert_row "USD" 800 0 800   "$(date -d '2 days ago' +'%Y-%m-%d 10:00:00')"
+insert_row "USD" 750 0 750   "$(date -d '2 days ago' +'%Y-%m-%d 10:05:00')"
+# Day -1: $7.50 → $7.00 (spent $0.50)
+insert_row "USD" 750 0 750   "$(date -d '1 day ago' +'%Y-%m-%d 10:00:00')"
+insert_row "USD" 700 0 700   "$(date -d '1 day ago' +'%Y-%m-%d 10:05:00')"
+# Today: $7.00 → $6.50 (spent $0.50, still in progress)
+insert_row "USD" 700 0 700   "$(date +'%Y-%m-%d 10:00:00')"
+insert_row "USD" 650 0 650   "$(date +'%Y-%m-%d 10:05:00')"
+
+OUT=$(run_query summary)
+assert_contains "summary shows current balance" "$OUT" "balance \$6.50"
+assert_contains "summary shows days tracked" "$OUT" "5 days tracked"
+
+OUT=$(run_query -j summary)
+assert_json_key "json summary balance" "$OUT" '.USD.current_balance' "6.50"
+assert_json_key "json summary days" "$OUT" '.USD.days_tracked' "5"
+
+# --- Tests: top-up not counted as negative spend ---------------------------
+
+echo "=== Top-up handling ==="
+setup_db
+insert_row "USD" 500 0 500 "2026-06-19 10:00:00"
+insert_row "USD" 400 0 400 "2026-06-19 10:05:00"  # spent $1.00
+insert_row "USD" 900 0 900 "2026-06-19 10:10:00"  # topped up $5.00 — should NOT be counted
+
+OUT=$(run_query today)
+assert_contains "top-up ignored in spend" "$OUT" "spent \$1.00"
+assert_not_contains "top-up not negative" "$OUT" "spent -"
+
+# --- Tests: JSON output flag -----------------------------------------------
+
+echo "=== JSON output ==="
+setup_db
+insert_row "USD" 426 0 426 "2026-06-19 10:00:00"
+
+OUT=$(run_query -j current)
+assert_contains "json is valid JSON array start" "$OUT" "["
+assert_contains "json contains currency" "$OUT" '"currency":"USD"'
+
+OUT=$(run_query current)
+assert_contains "text is not JSON" "$OUT" "\$4.26"
+assert_not_contains "text has no brackets" "$OUT" "["
+
+# --- Tests: edge cases -----------------------------------------------------
+
+echo "=== Edge cases ==="
+
+# Invalid subcommand
+OUT=$(run_query invalid 2>&1 || true)
+assert_contains "invalid subcommand error" "$OUT" "unknown subcommand"
+
+# Help flag
+OUT=$(run_query -h 2>&1 || true)
+assert_contains "help shows usage" "$OUT" "Usage:"
+
+# Custom history count
+setup_db
+for i in $(seq 1 5); do
+    insert_row "USD" "$((100 + i))" 0 "$((100 + i))" "2026-06-19 10:0${i}:00"
+done
+OUT=$(run_query history 3)
+# Should show exactly 3 rows plus header = 4 lines
+LINES=$(echo "$OUT" | wc -l)
+assert_contains "history -N shows N+header lines" "$LINES" "4"
+
+# Summary with only 1 snapshot (no deltas, averages should be 0)
+setup_db
+insert_row "USD" 500 0 500 "$(date +'%Y-%m-%d 10:00:00')"
+OUT=$(run_query summary)
+assert_contains "single snapshot summary shows balance" "$OUT" "balance \$5.00"
+assert_contains "single snapshot has 0 avg" "$OUT" "\$0.00/day"
+
+# --- Results ---------------------------------------------------------------
+
+echo ""
+echo "============================"
+echo "Results: $PASS passed, $FAIL failed"
+echo "============================"
+
+if [ "$FAIL" -gt 0 ]; then
+    exit 1
+fi

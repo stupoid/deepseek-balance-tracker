@@ -1,8 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    cat <<'EOF'
+deepseek-balance-poll — fetch DeepSeek balance and record to local SQLite.
+
+Usage:
+  deepseek-balance-poll
+
+Reads DEEPSEEK_API_KEY from:
+  1. $DEEPSEEK_API_KEY environment variable
+  2. ~/.config/deepseek-balance/secrets.env
+
+Exit codes:
+  0  Success — snapshot(s) recorded
+  1  No API key found
+  2  API call failed (non-200 response)
+  3  API returned no matching currency rows
+
+This is typically run by a systemd timer every 5 minutes.
+EOF
+    exit 0
+fi
+
 # --- Config ----------------------------------------------------------------
 : "${CURRENCY:=both}"
+: "${MAX_ROWS:=1000000}"
 DB_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/deepseek-balance-tracker"
 DB_FILE="$DB_DIR/balance.db"
 SECRETS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/deepseek-balance/secrets.env"
@@ -79,4 +102,19 @@ if [ "$INSERTED" -eq 0 ]; then
     exit 3
 fi
 
-echo "OK: inserted $INSERTED balance snapshot(s) (CURRENCY=$CURRENCY)"
+# --- Enforce row cap ---------------------------------------------------------
+if [ "$MAX_ROWS" -gt 0 ] 2>/dev/null; then
+    TOTAL=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM balance_snapshots;")
+    if [ "$TOTAL" -gt "$MAX_ROWS" ]; then
+        CUTOFF=$(sqlite3 "$DB_FILE" \
+            "SELECT COALESCE(MAX(id) - $MAX_ROWS, 0) FROM balance_snapshots;")
+        DELETED=$(sqlite3 "$DB_FILE" \
+            "DELETE FROM balance_snapshots WHERE id <= $CUTOFF; SELECT changes();")
+    else
+        DELETED=0
+    fi
+else
+    DELETED=0
+fi
+
+echo "OK: inserted $INSERTED balance snapshot(s) (CURRENCY=$CURRENCY; rows=$TOTAL/$MAX_ROWS; deleted=$DELETED)"

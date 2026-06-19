@@ -6,20 +6,42 @@ OUTPUT_MODE="text"
 
 usage() {
     cat <<'EOF'
-Usage: deepseek-balance [-j] <subcommand> [args]
+deepseek-balance — query DeepSeek account balance and usage from local history.
 
-Query your DeepSeek account balance and usage from local SQLite history.
+Usage:
+  deepseek-balance [-j] [-c USD|CNY] <subcommand> [args]
 
 Subcommands:
-  current        Latest balance
-  today          Total spend today (UTC)
-  history [N]    Last N snapshots (default 24)
-  summary        Averages, projection, days tracked
+  current         Latest balance per currency (total, granted, topped-up)
+  today           Total spend today in UTC (sum of balance decreases)
+  history [N]     Last N balance snapshots (default: 24)
+  summary         Averages over 7d/30d, estimated days remaining, days tracked
 
 Options:
-  -c USD|CNY     Currency filter (default: from $CURRENCY env, or 'both')
-  -j             JSON output (default: human-readable text)
-  -h             Show this help
+  -j              Output JSON instead of text (use this for scripting/bots)
+  -c USD|CNY      Filter to a single currency (default: all, or $CURRENCY env)
+  -h              Show this help
+
+Exit codes:
+  0   Success
+  1   No database found (run deepseek-balance-poll first)
+  2   Invalid subcommand or argument
+
+Examples for bots/scripts (always use -j):
+  deepseek-balance -j current | jq '.[0].topped_up_balance'
+  deepseek-balance -j -c USD today | jq '.USD.spend_today'
+  deepseek-balance -j summary | jq '.USD.estimated_days_left'
+  deepseek-balance -j history 5
+
+Human-readable examples:
+  deepseek-balance current
+  deepseek-balance -c USD today
+  deepseek-balance history 10
+  deepseek-balance summary
+
+Data source:
+  ~/.local/share/deepseek-balance-tracker/balance.db
+  Populated by: deepseek-balance-poll (systemd timer, every 5 min)
 EOF
     exit 0
 }
