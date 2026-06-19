@@ -53,19 +53,18 @@ Output is human-readable by default:
 
 ```
 $ deepseek-balance current
-USD  $4.16     total  $0.00     granted  $4.16     topped-up  (2026-06-19 06:41 UTC)
+USD  $4.03     total  $0.00     granted  $4.03     topped-up  (2026-06-19 07:06:02)
 
 $ deepseek-balance today
-USD  spent $0.06 today  (9 snapshots)
+USD  spent $0.03 today  (2 snapshots)
 
 $ deepseek-balance history 3
 CUR  BALANCE  RECORDED AT
-USD  $4.16    2026-06-19 06:41:56
-USD  $4.17    2026-06-19 06:41:02
-USD  $4.18    2026-06-19 06:38:02
+USD  $4.03     2026-06-19 07:06:02
+USD  $4.06     2026-06-19 07:02:04
 
 $ deepseek-balance summary
-USD  balance $4.16  avg $0.02/day (7d)  $0.01/day (30d)  ~347 days left  (1 day tracked)
+USD  balance $4.03  avg $0.00/day (7d)  $0.00/day (30d)  (1 days tracked)
 ```
 
 Add `-j` for JSON (scripts, bots, piping to `jq`):
