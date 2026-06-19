@@ -1,163 +1,119 @@
 # DeepSeek Balance Tracker
 
-Lightweight shell-script service that polls the [DeepSeek API](https://api-docs.deepseek.com/api/get-user-balance) every hour and records your account balance into a SQLite database. Other programs can query the DB to check current balance and usage patterns.
+**Track your DeepSeek API spending.** Two shell scripts + a systemd timer. Zero runtime dependencies beyond `curl`, `jq`, and `sqlite3`.
 
-Runs entirely in userspace — no root needed.
+Records your balance every 5 minutes into a SQLite database. Then query it: *how much did I spend today? What's my daily burn rate? How many days until I run out?*
 
-**Dependencies**: `curl`, `jq`, `sqlite3` — nothing else.
-
-## Quick Start
-
-### 1. Install dependencies
+## Install
 
 ```bash
-# NixOS: add `sqlite` to environment.systemPackages and rebuild
-sudo nixos-rebuild switch
-```
+git clone https://github.com/<you>/deepseek-balance-tracker.git
+cd deepseek-balance-tracker
 
-### 2. Set up secrets
+# 1. Install sqlite3 if you don't have it (apt, pacman, brew, nix — whatever)
 
-```bash
+# 2. Put your DeepSeek API key in a file
 mkdir -p ~/.config/deepseek-balance
 cp secrets.env.example ~/.config/deepseek-balance/secrets.env
 chmod 600 ~/.config/deepseek-balance/secrets.env
-# Edit with your real API key:
-vim ~/.config/deepseek-balance/secrets.env
-```
+# Edit the file: replace sk-your-api-key-here with your real key
+# Get a key at: https://platform.deepseek.com/api_keys
 
-Your `secrets.env` should look like:
-
-```
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
-CURRENCY=both
-```
-
-- `CURRENCY`: `USD`, `CNY`, or `both` (default)
-- You can also set `DEEPSEEK_API_KEY` in your environment for manual runs — the script checks the env var first
-
-### 3. Test manually
-
-```bash
-cd ~/code/deepseek-balance-tracker
-
-# Record your first snapshot
-./bin/poll-balance
-
-# Check current balance
-./bin/query-balance current
-
-# See usage today
-./bin/query-balance today
-
-# Last 24 snapshots
-./bin/query-balance history 24
-
-# Summary stats
-./bin/query-balance summary
-```
-
-### 4. Install systemd user timer
-
-```bash
+# 3. Install the systemd timer (runs every 5 minutes, userspace, no root)
 mkdir -p ~/.config/systemd/user
 cp etc/deepseek-balance.service ~/.config/systemd/user/
 cp etc/deepseek-balance.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now deepseek-balance.timer
 
-# Verify it's running
-systemctl --user status deepseek-balance.timer
-systemctl --user status deepseek-balance.service
-```
-
-To ensure the timer runs even when you're not logged in, enable lingering:
-
-```bash
+# Optional: keep it running when logged out
 loginctl enable-linger
 ```
 
-The timer fires every hour (`OnCalendar=hourly`). To change the interval, edit `~/.config/systemd/user/deepseek-balance.timer` and run `systemctl --user daemon-reload`.
-
-### 5. Check logs
+Done. It's recording. Check with:
 
 ```bash
 journalctl --user -u deepseek-balance.service -f
 ```
 
-## Usage Reference
-
-### `poll-balance`
-
-No arguments. Reads config from `$DEEPSEEK_API_KEY` env var, or falls back to `~/.config/deepseek-balance/secrets.env`.
+## Query
 
 ```bash
-DEEPSEEK_API_KEY=sk-... CURRENCY=USD ./bin/poll-balance
+./bin/query-balance current       # latest balance
+./bin/query-balance today         # how much you spent today
+./bin/query-balance history 10    # last 10 snapshots
+./bin/query-balance summary       # 7d/30d averages, days remaining
 ```
 
-### `query-balance`
-
-```
-query-balance [-c USD|CNY] <subcommand> [args]
-```
-
-| Subcommand | Output |
-|---|---|
-| `current` | Latest balance for each currency |
-| `today` | Spend today: sum of positive balance decreases (top-ups are ignored) |
-| `history [N]` | Last N snapshots (default 24) as JSON array |
-| `summary` | 7d/30d avg daily spend, current balance, estimated days remaining |
-
-All output is JSON. Use `jq` to extract what you need:
+All output is JSON. Pipe to `jq`:
 
 ```bash
-# Just the USD balance number
 ./bin/query-balance -c USD current | jq '.[0].topped_up_balance'
+# → 4.21
 
-# Today's USD spend
 ./bin/query-balance -c USD today | jq '.USD.spend_today'
+# → 0.05
 
-# Estimated days left
 ./bin/query-balance -c USD summary | jq '.USD.estimated_days_left'
+# → 84
 ```
 
-## How Usage Is Tracked
+## How it works
 
-Each snapshot records `topped_up_balance` (your paid balance). The difference between consecutive snapshots = spend in that interval. If your balance increases between snapshots (top-up), that interval is ignored.
-
-- **Today's usage**: sum of all positive `prev - curr` deltas across today's (UTC) snapshots
-- **Daily average**: per-day spend totals averaged over 7 or 30 days
-- **Estimated days left**: `current_balance / avg_daily_spend_30d`
-
-## Database
-
-SQLite file at `~/.local/share/deepseek-balance-tracker/balance.db`. Schema:
-
-```sql
-CREATE TABLE balance_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
-    currency TEXT NOT NULL,
-    total_balance REAL NOT NULL,
-    granted_balance REAL NOT NULL,
-    topped_up_balance REAL NOT NULL
-);
+```
+systemd timer (every 5 min)
+       │
+       ▼
+  poll-balance ──curl──▶ DeepSeek API /user/balance
+       │
+       ▼
+  SQLite DB (~/.local/share/deepseek-balance-tracker/balance.db)
+       │
+       ▼
+  query-balance ◀── any script, bot, or status bar
 ```
 
-Query it directly:
+- **Spending** = decrease in `topped_up_balance` between snapshots. Balance increases (top-ups) are ignored.
+- **Currency** = `USD`, `CNY`, or `both` — set `CURRENCY` in your secrets file.
+- **Interval** = edit `OnCalendar` in the timer file to change it (default: every 5 min).
 
-```bash
-sqlite3 ~/.local/share/deepseek-balance-tracker/balance.db \
-  "SELECT * FROM balance_snapshots ORDER BY id DESC LIMIT 5;"
+## Adjust the polling interval
+
+Edit `~/.config/systemd/user/deepseek-balance.timer`:
+
+```ini
+# Every 5 minutes (default)
+OnCalendar=*:0/5
+
+# Every 15 minutes
+OnCalendar=*:0/15
+
+# Every hour
+OnCalendar=hourly
 ```
+
+Then `systemctl --user daemon-reload && systemctl --user restart deepseek-balance.timer`.
 
 ## Files
 
-| Path | Purpose |
+| What | Where |
 |---|---|
-| `bin/poll-balance` | Fetch + record balance from API |
-| `bin/query-balance` | Query balance history and usage stats |
-| `etc/deepseek-balance.service` | systemd user oneshot service |
-| `etc/deepseek-balance.timer` | systemd user timer (hourly) |
-| `secrets.env.example` | Template for `~/.config/deepseek-balance/secrets.env` |
-| `~/.local/share/deepseek-balance-tracker/balance.db` | SQLite database (runtime) |
-| `~/.config/deepseek-balance/secrets.env` | API key + config (runtime, chmod 600) |
+| Scripts | `bin/poll-balance`, `bin/query-balance` |
+| systemd units | `etc/deepseek-balance.service`, `etc/deepseek-balance.timer` |
+| Your API key | `~/.config/deepseek-balance/secrets.env` |
+| SQLite DB | `~/.local/share/deepseek-balance-tracker/balance.db` |
+
+## Database
+
+All monetary values are stored as **integer cents** to avoid floating-point issues.
+
+```bash
+sqlite3 ~/.local/share/deepseek-balance-tracker/balance.db \
+  "SELECT recorded_at, topped_up_balance_cents / 100.0 AS balance
+   FROM balance_snapshots WHERE currency = 'USD'
+   ORDER BY id DESC LIMIT 5;"
+```
+
+## License
+
+MIT

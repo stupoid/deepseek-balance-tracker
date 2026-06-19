@@ -14,17 +14,9 @@ if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
         source "$SECRETS_FILE"
     fi
 fi
-# Fallback: also check ~/.claude/secrets.env
-if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-    CLAUDE_SECRETS="$HOME/.claude/secrets.env"
-    if [ -f "$CLAUDE_SECRETS" ]; then
-        # shellcheck source=/dev/null
-        source "$CLAUDE_SECRETS"
-    fi
-fi
 
 if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-    echo "ERROR: DEEPSEEK_API_KEY is not set. Set it in the environment, in $SECRETS_FILE, or in $CLAUDE_SECRETS" >&2
+    echo "ERROR: DEEPSEEK_API_KEY is not set. Set it in the environment or in $SECRETS_FILE" >&2
     exit 1
 fi
 
