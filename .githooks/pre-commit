@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# DeepSeek Balance Tracker — pre-commit hook
+# Runs syntax checks and tests. Blocks commit on failure.
+set -euo pipefail
+
+GIT_ROOT="$(git rev-parse --show-toplevel)"
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+pass()  { echo -e "  ${GREEN}PASS${NC} $1"; }
+fail()  { echo -e "  ${RED}FAIL${NC} $1"; exit 1; }
+
+echo ""
+
+# --- Syntax check ----------------------------------------------------------
+echo ">>> Syntax checks"
+for script in "$GIT_ROOT"/bin/*; do
+    if bash -n "$script" 2>&1; then
+        pass "$(basename "$script")"
+    else
+        fail "$(basename "$script") — fix syntax errors before committing"
+    fi
+done
+
+# --- ShellCheck (if available) ---------------------------------------------
+if command -v shellcheck &>/dev/null; then
+    echo ">>> ShellCheck"
+    for script in "$GIT_ROOT"/bin/*; do
+        if shellcheck -x "$script" 2>&1; then
+            pass "shellcheck $(basename "$script")"
+        else
+            fail "shellcheck $(basename "$script") — fix warnings before committing"
+        fi
+    done
+else
+    echo ">>> ShellCheck not installed — skipping (install: apt install shellcheck)"
+fi
+
+# --- Tests -----------------------------------------------------------------
+echo ">>> Test suite"
+if [ -x "$GIT_ROOT/test/run" ]; then
+    if "$GIT_ROOT/test/run"; then
+        pass "test suite"
+    else
+        fail "test suite — fix failing tests before committing"
+    fi
+else
+    echo "  (no test suite found — skipping)"
+fi
+
+echo ""
+echo -e "${GREEN}All checks passed.${NC}"
+echo ""
