@@ -18,6 +18,9 @@ Exit codes:
   2  API call failed (non-200 response)
   3  API returned no matching currency rows
 
+After recording, checks balance against ALERT_THRESHOLD_USD/CNY (if configured)
+and runs ALERT_COMMAND when a threshold is breached (fires once, re-arms on recovery).
+
 This is typically run by a systemd timer every 5 minutes.
 EOF
     exit 0
@@ -122,3 +125,86 @@ if [ "$MAX_ROWS" -gt 0 ] 2>/dev/null; then
 fi
 
 echo "OK: inserted $INSERTED balance snapshot(s) (CURRENCY=$CURRENCY; rows=$TOTAL/$MAX_ROWS; deleted=$DELETED)"
+# --- Alert check -------------------------------------------------------------
+ALERT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/deepseek-balance-tracker"
+ALERT_STATE_FILE="$ALERT_STATE_DIR/alert-state"
+mkdir -p "$ALERT_STATE_DIR"
+
+# Load threshold config from secrets if not already set (e.g. DEEPSEEK_API_KEY
+# was provided via env and source was skipped above).
+# Env vars take priority — only read from file if var is not already set.
+if [ -f "$SECRETS_FILE" ]; then
+    if [ -z "${ALERT_THRESHOLD_USD+set}" ]; then
+        ALERT_THRESHOLD_USD=$(grep -oP '^ALERT_THRESHOLD_USD=\K.*' "$SECRETS_FILE" 2>/dev/null || echo "")
+    fi
+    if [ -z "${ALERT_THRESHOLD_CNY+set}" ]; then
+        ALERT_THRESHOLD_CNY=$(grep -oP '^ALERT_THRESHOLD_CNY=\K.*' "$SECRETS_FILE" 2>/dev/null || echo "")
+    fi
+    if [ -z "${ALERT_COMMAND+set}" ]; then
+        ALERT_COMMAND=$(grep -oP '^ALERT_COMMAND=\K.*' "$SECRETS_FILE" 2>/dev/null || echo "")
+    fi
+fi
+
+run_alert_check() {
+    local currency="$1" threshold_var="$2"
+    local threshold="${!threshold_var:-}"
+
+    # Skip if threshold not set or empty
+    [ -n "$threshold" ] || return 0
+
+    # Get latest topped_up_balance in cents
+    local balance_cents
+    balance_cents=$(sqlite3 "$DB_FILE" \
+        "SELECT topped_up_balance_cents FROM balance_snapshots
+         WHERE currency = '$currency' ORDER BY id DESC LIMIT 1;")
+    [ -n "$balance_cents" ] || return 0  # No data yet
+
+    # Read current alert state (default: ok)
+    local current_state="ok"
+    if [ -f "$ALERT_STATE_FILE" ]; then
+        current_state=$(grep "^${currency}:" "$ALERT_STATE_FILE" 2>/dev/null | cut -d: -f2 || echo "ok")
+    fi
+
+    # Convert threshold to cents
+    local threshold_cents
+    threshold_cents=$(awk -v t="$threshold" 'BEGIN { printf "%d", (t + 0.0) * 100 + 0.5 }')
+    local balance_dollars
+    balance_dollars=$(awk -v c="$balance_cents" 'BEGIN { printf "%.2f", c / 100.0 }')
+
+    # Update state file helper
+    _write_alert_state() {
+        local new_state="$1"
+        if [ -f "$ALERT_STATE_FILE" ]; then
+            if grep -q "^${currency}:" "$ALERT_STATE_FILE" 2>/dev/null; then
+                sed -i "s/^${currency}:.*/${currency}:${new_state}/" "$ALERT_STATE_FILE"
+            else
+                echo "${currency}:${new_state}" >> "$ALERT_STATE_FILE"
+            fi
+        else
+            echo "${currency}:${new_state}" > "$ALERT_STATE_FILE"
+        fi
+    }
+
+    if [ "$balance_cents" -lt "$threshold_cents" ] && [ "$current_state" = "ok" ]; then
+        _write_alert_state "fired"
+        echo "ALERT: ${currency} balance \$${balance_dollars} is below threshold \$${threshold} — executing ALERT_COMMAND" >&2
+        if [ -n "${ALERT_COMMAND:-}" ]; then
+            if [ -x "$ALERT_COMMAND" ]; then
+                DBT_BALANCE="$balance_dollars" \
+                DBT_BALANCE_CENTS="$balance_cents" \
+                DBT_THRESHOLD="$threshold" \
+                DBT_CURRENCY="$currency" \
+                "$ALERT_COMMAND" || true
+            else
+                echo "ALERT: ALERT_COMMAND is not executable: $ALERT_COMMAND" >&2
+            fi
+        fi
+    elif [ "$balance_cents" -ge "$threshold_cents" ] && [ "$current_state" = "fired" ]; then
+        _write_alert_state "ok"
+        echo "ALERT: ${currency} balance \$${balance_dollars} is back above threshold \$${threshold} — alert re-armed" >&2
+    fi
+}
+
+run_alert_check "USD" "ALERT_THRESHOLD_USD"
+run_alert_check "CNY" "ALERT_THRESHOLD_CNY"
+

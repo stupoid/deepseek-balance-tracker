@@ -54,6 +54,18 @@ SQLite uses single-writer locking. If `deepseek-balance` (reader) runs at the ex
 
 If DeepSeek adds a new currency (e.g., EUR), it will be recorded automatically if `CURRENCY=both`. If you have `CURRENCY=USD`, the new currency is silently ignored until you update your config.
 
+### Alert state is in-memory per poll
+
+The `alert-state` file is read at the start of each alert check and written when state changes. If two polls overlap (rare — see concurrent polls above), the second poll may re-fire an already-fired alert because it reads stale state. The window is tiny and the worst case is a duplicate notification.
+
+### Alert thresholds are poll-only
+
+The `check-alert` subcommand reads thresholds from the current environment or `secrets.env`. It does *not* read from the alert-state file — it reports the current balance against the threshold, not whether an alert has already fired. Use `check-alert` to inspect the current situation, and rely on the poll's state tracking to avoid duplicate notifications.
+
+### Alert command is synchronous
+
+`ALERT_COMMAND` runs synchronously during the poll. If your script takes 30 seconds (e.g., waiting for a network call), the poll is delayed by 30 seconds. Keep alert scripts fast. For slow webhooks, background them: `your-script &`.
+
 ### UTC date boundaries
 
 All "today" calculations use UTC. If you're in UTC-8, "today" resets at 4pm your time. This is by design (consistent, no DST issues) but can be surprising.

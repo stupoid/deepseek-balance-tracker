@@ -17,6 +17,7 @@ Subcommands:
   recent          Total spend in the last 60 minutes
   history [N]     Last N balance snapshots (default: 24)
   summary         Averages over 7d/30d, estimated days remaining, days tracked
+  check-alert     Check current balance against configured alert thresholds
 
 Options:
   -j              Output JSON instead of text (use this for scripting/bots)
@@ -25,7 +26,7 @@ Options:
 
 Exit codes:
   0   Success
-  1   No database found (run deepseek-balance-poll first)
+  1   No database found, or alert threshold breached (check-alert)
   2   Invalid subcommand or argument
 
 Examples for bots/scripts (always use -j):
@@ -41,6 +42,7 @@ Human-readable examples:
   deepseek-balance recent
   deepseek-balance history 10
   deepseek-balance summary
+  deepseek-balance -j check-alert
 
 Data source:
   ~/.local/share/deepseek-balance-tracker/balance.db
@@ -325,6 +327,91 @@ text_summary() {
     done
 }
 
+
+# --- Check alert --------------------------------------------------------------
+_load_alert_thresholds() {
+    # Only source secrets.env if env vars are not already set (env overrides file).
+    if [ -z "${ALERT_THRESHOLD_USD_LOADED:-}" ]; then
+        local secrets
+        secrets="${XDG_CONFIG_HOME:-$HOME/.config}/deepseek-balance/secrets.env"
+        if [ -f "$secrets" ]; then
+            # Read threshold/command from file, but only if env didn't already provide them
+            if [ -z "${ALERT_THRESHOLD_USD+set}" ]; then
+                ALERT_THRESHOLD_USD=$(grep -oP '^ALERT_THRESHOLD_USD=\K.*' "$secrets" 2>/dev/null || echo "")
+            fi
+            if [ -z "${ALERT_THRESHOLD_CNY+set}" ]; then
+                ALERT_THRESHOLD_CNY=$(grep -oP '^ALERT_THRESHOLD_CNY=\K.*' "$secrets" 2>/dev/null || echo "")
+            fi
+            if [ -z "${ALERT_COMMAND+set}" ]; then
+                ALERT_COMMAND=$(grep -oP '^ALERT_COMMAND=\K.*' "$secrets" 2>/dev/null || echo "")
+            fi
+        fi
+        ALERT_THRESHOLD_USD_LOADED=1
+    fi
+}
+
+json_check_alert() {
+    _load_alert_thresholds
+    local has_alert=0 first=1 pair cur thr bal bal_dollars thr_cents alert
+    echo "{"
+    for pair in "USD:${ALERT_THRESHOLD_USD:-}" "CNY:${ALERT_THRESHOLD_CNY:-}"; do
+        cur="${pair%%:*}"
+        thr="${pair#*:}"
+        [ "$first" = 0 ] && echo ","
+        first=0
+        if [ -z "$thr" ]; then
+            printf '  "%s": {"balance": null, "threshold": null, "alert": false}\n' "$cur"
+        else
+            bal=$(sqlite3 "$DB_FILE" \
+                "SELECT topped_up_balance_cents FROM balance_snapshots
+                 WHERE currency = '$cur' ORDER BY id DESC LIMIT 1;" 2>/dev/null || echo "")
+            if [ -z "$bal" ]; then
+                printf '  "%s": {"balance": null, "threshold": %s, "alert": false}\n' "$cur" "$thr"
+            else
+                bal_dollars=$(awk -v c="$bal" 'BEGIN { printf "%.2f", c / 100.0 }')
+                thr_cents=$(awk -v t="$thr" 'BEGIN { printf "%d", (t + 0.0) * 100 + 0.5 }')
+                alert="false"
+                if [ "$bal" -lt "$thr_cents" ]; then
+                    alert="true"
+                    has_alert=1
+                fi
+                printf '  "%s": {"balance": %s, "threshold": %s, "alert": %s}\n' \
+                    "$cur" "$bal_dollars" "$thr" "$alert"
+            fi
+        fi
+    done
+    echo "}"
+    return $has_alert
+}
+
+text_check_alert() {
+    _load_alert_thresholds
+    local has_alert=0 pair cur thr bal bal_dollars thr_cents
+    for pair in "USD:${ALERT_THRESHOLD_USD:-}" "CNY:${ALERT_THRESHOLD_CNY:-}"; do
+        cur="${pair%%:*}"
+        thr="${pair#*:}"
+        if [ -z "$thr" ]; then
+            printf "%-4s disabled  (no threshold configured)\n" "$cur"
+            continue
+        fi
+        bal=$(sqlite3 "$DB_FILE" \
+            "SELECT topped_up_balance_cents FROM balance_snapshots
+             WHERE currency = '$cur' ORDER BY id DESC LIMIT 1;" 2>/dev/null || echo "")
+        if [ -z "$bal" ]; then
+            printf "%-4s no data   (threshold: \$%s)\n" "$cur" "$thr"
+            continue
+        fi
+        bal_dollars=$(awk -v c="$bal" 'BEGIN { printf "%.2f", c / 100.0 }')
+        thr_cents=$(awk -v t="$thr" 'BEGIN { printf "%d", (t + 0.0) * 100 + 0.5 }')
+        if [ "$bal" -lt "$thr_cents" ]; then
+            printf "%-4s \$%-8s ALERT     (threshold: \$%s)\n" "$cur" "$bal_dollars" "$thr"
+            has_alert=1
+        else
+            printf "%-4s \$%-8s ok        (threshold: \$%s)\n" "$cur" "$bal_dollars" "$thr"
+        fi
+    done
+    return $has_alert
+}
 # --- Dispatch --------------------------------------------------------------
 case "$SUBCMD" in
     current)
@@ -337,5 +424,7 @@ case "$SUBCMD" in
         if [ "$OUTPUT_MODE" = "json" ]; then json_history; else text_history; fi ;;
     summary)
         if [ "$OUTPUT_MODE" = "json" ]; then json_summary; else text_summary; fi ;;
+    check-alert)
+        if [ "$OUTPUT_MODE" = "json" ]; then json_check_alert; else text_check_alert; fi ;;
     *)  echo "deepseek-balance: unknown subcommand '$SUBCMD'" >&2; exit 2 ;;
 esac

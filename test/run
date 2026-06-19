@@ -275,6 +275,192 @@ OUT=$(run_query summary)
 assert_contains "single snapshot summary shows balance" "$OUT" "balance \$5.00"
 assert_contains "single snapshot has 0 avg" "$OUT" "\$0.00/day"
 
+# --- Tests: check-alert ----------------------------------------------------
+
+echo "=== Check-alert ==="
+
+# No thresholds → disabled
+setup_db
+insert_row "USD" 426 0 426 "2026-06-19 10:00:00"
+OUT=$(ALERT_THRESHOLD_USD="" ALERT_THRESHOLD_CNY="" run_query check-alert 2>&1)
+assert_contains "no thresholds: USD disabled" "$OUT" "USD  disabled"
+assert_contains "no thresholds: CNY disabled" "$OUT" "CNY  disabled"
+assert_not_contains "no thresholds: no ALERT" "$OUT" "ALERT"
+
+# Above threshold → ok
+setup_db
+insert_row "USD" 403 0 403 "2026-06-19 10:00:00"
+OUT=$(ALERT_THRESHOLD_USD="1.00" ALERT_THRESHOLD_CNY="" run_query check-alert 2>&1)
+assert_contains "above threshold shows ok" "$OUT" "ok"
+assert_contains "above threshold shows balance" "$OUT" "\$4.03"
+
+# Below threshold → ALERT, exit 1
+setup_db
+insert_row "USD" 50 0 50 "2026-06-19 10:00:00"
+OUT=$(ALERT_THRESHOLD_USD="1.00" ALERT_THRESHOLD_CNY="" run_query check-alert 2>&1 || true)
+assert_contains "below threshold shows ALERT" "$OUT" "ALERT"
+
+# Verify exit code is 1 when alert fires
+setup_db
+insert_row "USD" 50 0 50 "2026-06-19 10:00:00"
+ACTUAL_EXIT=$(ALERT_THRESHOLD_USD="2.00" ALERT_THRESHOLD_CNY="" run_query check-alert >/dev/null 2>&1; echo $?)
+if [ "$ACTUAL_EXIT" = "1" ]; then
+    echo "  PASS check-alert exit code 1 on alert"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL check-alert exit code — expected 1, got $ACTUAL_EXIT"
+    FAIL=$((FAIL + 1))
+fi
+
+# JSON output — above threshold
+setup_db
+insert_row "USD" 403 0 403 "2026-06-19 10:00:00"
+OUT=$(ALERT_THRESHOLD_USD="1.00" ALERT_THRESHOLD_CNY="" run_query -j check-alert 2>&1)
+assert_json_key "json alert false when above" "$OUT" '.USD.alert' "false"
+assert_json_key "json balance is correct" "$OUT" '.USD.balance' "4.03"
+assert_json_key "json threshold is correct" "$OUT" '.USD.threshold' "1.00"
+
+# JSON output — below threshold
+setup_db
+insert_row "USD" 50 0 50 "2026-06-19 10:00:00"
+OUT=$(ALERT_THRESHOLD_USD="2.00" ALERT_THRESHOLD_CNY="" run_query -j check-alert 2>&1 || true)
+assert_json_key "json alert true when below" "$OUT" '.USD.alert' "true"
+assert_json_key "json balance cents" "$OUT" '.USD.balance' "0.50"
+
+# CNY threshold
+setup_db
+insert_row "CNY" 500 0 500 "2026-06-19 10:00:00"
+OUT=$(ALERT_THRESHOLD_CNY="10.00" run_query check-alert 2>&1 || true)
+assert_contains "cny below threshold ALERT" "$OUT" "ALERT"
+
+setup_db
+insert_row "CNY" 5000 0 5000 "2026-06-19 10:00:00"
+OUT=$(ALERT_THRESHOLD_CNY="10.00" run_query check-alert 2>&1)
+assert_contains "cny above threshold ok" "$OUT" "ok"
+
+# Both currencies at once
+setup_db
+insert_row "USD" 403 0 403 "2026-06-19 10:00:00"
+insert_row "CNY" 500 0 500 "2026-06-19 10:01:00"
+OUT=$(ALERT_THRESHOLD_USD="1.00" ALERT_THRESHOLD_CNY="10.00" run_query check-alert 2>&1 || true)
+assert_contains "both: USD ok" "$OUT" "USD  \$4.03"
+assert_contains "both: CNY ALERT" "$OUT" "ALERT"
+
+# No data → no data message
+setup_db
+OUT=$(ALERT_THRESHOLD_USD="1.00" ALERT_THRESHOLD_CNY="" run_query check-alert 2>&1 || true)
+assert_contains "no data shows message" "$OUT" "no data"
+
+# --- Tests: poll alert integration -----------------------------------------
+
+echo "=== Poll alert integration ==="
+
+# Set up alert command that writes to a marker file when called
+ALERT_MARKER="$TMPDIR/alert-fired"
+cat > "$TMPDIR/alert-script" <<SCRIPTEOF
+#!/usr/bin/env bash
+echo "fired currency=\$DBT_CURRENCY balance=\$DBT_BALANCE threshold=\$DBT_THRESHOLD" > "$ALERT_MARKER"
+SCRIPTEOF
+chmod +x "$TMPDIR/alert-script"
+
+# Mock curl that returns a below-threshold balance
+MOCK_CURL="$TMPDIR/curl"
+cat > "$MOCK_CURL" <<'CURLEOF'
+#!/usr/bin/env bash
+# Return a low balance that should trigger the alert.
+# Must mimic curl -w '\n%{http_code}' output: body + newline + http_code
+echo '{"balance_infos":[{"currency":"USD","total_balance":"0.95","granted_balance":"0.00","topped_up_balance":"0.95"}]}'
+echo "200"
+CURLEOF
+chmod +x "$MOCK_CURL"
+
+# Config dir with secrets
+mkdir -p "$TMPDIR/config/deepseek-balance"
+cat > "$TMPDIR/config/deepseek-balance/secrets.env" <<EOF
+DEEPSEEK_API_KEY=sk-test
+CURRENCY=both
+RETENTION_DAYS=0
+ALERT_THRESHOLD_USD=1.00
+ALERT_COMMAND=$TMPDIR/alert-script
+EOF
+
+# State dir
+mkdir -p "$TMPDIR/state/deepseek-balance-tracker"
+
+# Pre-populate DB above threshold (state should be ok)
+setup_db
+insert_row "USD" 200 0 200 "2026-06-19 10:00:00"
+
+# Write initial state as "ok" so alert can fire
+mkdir -p "$TMPDIR/state"
+echo "USD:ok" > "$TMPDIR/state/deepseek-balance-tracker/alert-state"
+
+# Run the poll with mock curl and our config
+rm -f "$ALERT_MARKER"
+PATH="$TMPDIR:$PATH" \
+  XDG_DATA_HOME="$XDG_DATA_HOME" \
+  XDG_CONFIG_HOME="$TMPDIR/config" \
+  XDG_STATE_HOME="$TMPDIR/state" \
+  bash "$PROJECT_DIR/bin/deepseek-balance-poll" >/dev/null 2>&1 || true
+
+if [ -f "$ALERT_MARKER" ]; then
+    echo "  PASS poll alert fires when balance drops below threshold"
+    PASS=$((PASS + 1))
+    # Verify env vars were passed
+    MARKER_CONTENT=$(cat "$ALERT_MARKER")
+    assert_contains "poll alert has currency" "$MARKER_CONTENT" "currency=USD"
+    assert_contains "poll alert has balance" "$MARKER_CONTENT" "balance=0.95"
+    assert_contains "poll alert has threshold" "$MARKER_CONTENT" "threshold=1.00"
+else
+    echo "  FAIL poll alert did not fire (marker file not found)"
+    FAIL=$((FAIL + 1))
+fi
+
+# Test: alert does NOT re-fire when already in "fired" state
+rm -f "$ALERT_MARKER"
+echo "USD:fired" > "$TMPDIR/state/deepseek-balance-tracker/alert-state"
+
+PATH="$TMPDIR:$PATH" \
+  XDG_DATA_HOME="$XDG_DATA_HOME" \
+  XDG_CONFIG_HOME="$TMPDIR/config" \
+  XDG_STATE_HOME="$TMPDIR/state" \
+  bash "$PROJECT_DIR/bin/deepseek-balance-poll" >/dev/null 2>&1 || true
+
+if [ -f "$ALERT_MARKER" ]; then
+    echo "  FAIL poll alert re-fired when already in fired state"
+    FAIL=$((FAIL + 1))
+else
+    echo "  PASS poll alert does not re-fire in fired state"
+    PASS=$((PASS + 1))
+fi
+
+# Test: auto re-arm when balance goes back above threshold
+rm -f "$ALERT_MARKER"
+
+# Mock curl that returns above-threshold balance
+cat > "$MOCK_CURL" <<'CURLEOF'
+#!/usr/bin/env bash
+echo '{"balance_infos":[{"currency":"USD","total_balance":"5.00","granted_balance":"0.00","topped_up_balance":"5.00"}]}'
+echo "200"
+CURLEOF
+
+echo "USD:fired" > "$TMPDIR/state/deepseek-balance-tracker/alert-state"
+
+PATH="$TMPDIR:$PATH" \
+  XDG_DATA_HOME="$XDG_DATA_HOME" \
+  XDG_CONFIG_HOME="$TMPDIR/config" \
+  XDG_STATE_HOME="$TMPDIR/state" \
+  bash "$PROJECT_DIR/bin/deepseek-balance-poll" >/dev/null 2>&1 || true
+
+STATE_AFTER=$(cat "$TMPDIR/state/deepseek-balance-tracker/alert-state")
+if echo "$STATE_AFTER" | grep -q "USD:ok"; then
+    echo "  PASS poll alert re-arms when balance returns above threshold"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL poll alert did not re-arm (state: $STATE_AFTER)"
+    FAIL=$((FAIL + 1))
+fi
+
 # --- Results ---------------------------------------------------------------
 
 echo ""
