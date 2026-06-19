@@ -54,22 +54,46 @@ get_currencies() {
     fi
 }
 
+# --- JSON formatting helpers ------------------------------------------------
+# sqlite3 -json produces floating-point noise for REAL values.
+# We format manually to get clean 2-decimal output from integer cents.
+
+cents_to_dollars() {
+    awk -v c="$1" 'BEGIN { printf "%.2f", c / 100.0 }'
+}
+
+# Output a single balance row as a JSON object
+json_balance_row() {
+    local currency="$1" total_cents="$2" granted_cents="$3" topped_cents="$4" recorded_at="$5"
+    local total granted topped
+    total=$(cents_to_dollars "$total_cents")
+    granted=$(cents_to_dollars "$granted_cents")
+    topped=$(cents_to_dollars "$topped_cents")
+    printf '{"currency":"%s","total_balance":%s,"granted_balance":%s,"topped_up_balance":%s,"recorded_at":"%s"}' \
+        "$currency" "$total" "$granted" "$topped" "$recorded_at"
+}
+
 # --- Subcommands -----------------------------------------------------------
 
 cmd_current() {
+    local where_clause
     if [ "$CURRENCY" = "both" ]; then
-        sqlite3 -json "$DB_FILE" \
-            "SELECT currency, total_balance, granted_balance, topped_up_balance, recorded_at
-             FROM balance_snapshots
-             WHERE id IN (SELECT MAX(id) FROM balance_snapshots GROUP BY currency)
-             ORDER BY currency;"
+        where_clause="WHERE id IN (SELECT MAX(id) FROM balance_snapshots GROUP BY currency)"
     else
-        sqlite3 -json "$DB_FILE" \
-            "SELECT currency, total_balance, granted_balance, topped_up_balance, recorded_at
-             FROM balance_snapshots
-             WHERE currency = '$CURRENCY'
-             ORDER BY id DESC LIMIT 1;"
+        where_clause="WHERE currency = '$CURRENCY'"
     fi
+
+    local first=1
+    echo "["
+    while IFS='|' read -r currency total_cents granted_cents topped_cents recorded_at; do
+        [ "$first" = 1 ] || echo ","
+        first=0
+        json_balance_row "$currency" "$total_cents" "$granted_cents" "$topped_cents" "$recorded_at"
+    done < <(sqlite3 -separator '|' "$DB_FILE" \
+        "SELECT currency, total_balance_cents, granted_balance_cents, topped_up_balance_cents, recorded_at
+         FROM balance_snapshots $where_clause ORDER BY currency;")
+    echo ""
+    echo "]"
 }
 
 cmd_today() {
@@ -79,17 +103,16 @@ cmd_today() {
         [ "$first" = 1 ] || echo ","
         first=0
 
-        # Sum of positive deltas (prev - curr) across today's snapshots.
-        # Negative deltas = top-up, ignored.
-        SPEND=$(sqlite3 "$DB_FILE" "
+        # Sum of positive deltas (prev - curr) across today's snapshots, in cents.
+        SPEND_CENTS=$(sqlite3 "$DB_FILE" "
             WITH ordered AS (
-                SELECT topped_up_balance,
-                       LAG(topped_up_balance) OVER (ORDER BY id) AS prev
+                SELECT topped_up_balance_cents,
+                       LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
                 FROM balance_snapshots
                 WHERE currency = '$CUR'
                   AND date(recorded_at) = date('now')
             )
-            SELECT COALESCE(SUM(MAX(prev - topped_up_balance, 0)), 0)
+            SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
             FROM ordered
             WHERE prev IS NOT NULL;
         ")
@@ -98,6 +121,7 @@ cmd_today() {
             "SELECT COUNT(*) FROM balance_snapshots
              WHERE currency = '$CUR' AND date(recorded_at) = date('now');")
 
+        SPEND=$(awk -v c="$SPEND_CENTS" 'BEGIN { printf "%.2f", c / 100.0 }')
         printf '  "%s": {"spend_today": %s, "snapshots_today": %s}' \
             "$CUR" "$SPEND" "$ROW_COUNT"
     done
@@ -106,20 +130,24 @@ cmd_today() {
 }
 
 cmd_history() {
+    local where_clause
     if [ "$CURRENCY" = "both" ]; then
-        sqlite3 -json "$DB_FILE" \
-            "SELECT currency, total_balance, granted_balance, topped_up_balance, recorded_at
-             FROM balance_snapshots
-             ORDER BY id DESC
-             LIMIT $N;"
+        where_clause=""
     else
-        sqlite3 -json "$DB_FILE" \
-            "SELECT currency, total_balance, granted_balance, topped_up_balance, recorded_at
-             FROM balance_snapshots
-             WHERE currency = '$CURRENCY'
-             ORDER BY id DESC
-             LIMIT $N;"
+        where_clause="WHERE currency = '$CURRENCY'"
     fi
+
+    local first=1
+    echo "["
+    while IFS='|' read -r currency total_cents granted_cents topped_cents recorded_at; do
+        [ "$first" = 1 ] || echo ","
+        first=0
+        json_balance_row "$currency" "$total_cents" "$granted_cents" "$topped_cents" "$recorded_at"
+    done < <(sqlite3 -separator '|' "$DB_FILE" \
+        "SELECT currency, total_balance_cents, granted_balance_cents, topped_up_balance_cents, recorded_at
+         FROM balance_snapshots $where_clause ORDER BY id DESC LIMIT $N;")
+    echo ""
+    echo "]"
 }
 
 cmd_summary() {
@@ -129,66 +157,54 @@ cmd_summary() {
         [ "$first" = 1 ] || echo ","
         first=0
 
-        # Current topped-up balance
-        CURRENT=$(sqlite3 "$DB_FILE" \
-            "SELECT topped_up_balance FROM balance_snapshots
+        # Current topped-up balance (in cents)
+        CURRENT_CENTS=$(sqlite3 "$DB_FILE" \
+            "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR'
              ORDER BY id DESC LIMIT 1;")
+
+        CURRENT=$(awk -v c="$CURRENT_CENTS" 'BEGIN { printf "%.2f", c / 100.0 }')
 
         # Days tracked
         DAYS_TRACKED=$(sqlite3 "$DB_FILE" \
             "SELECT COUNT(DISTINCT date(recorded_at))
              FROM balance_snapshots WHERE currency = '$CUR';")
 
-        # 7-day avg daily spend: compute per-day spend from consecutive deltas,
-        # then average across days that had spend > 0.
-        AVG_7D=$(sqlite3 "$DB_FILE" "
-            WITH consecutive AS (
-                SELECT date(recorded_at) AS day,
-                       topped_up_balance,
-                       LAG(topped_up_balance) OVER (ORDER BY id) AS prev
-                FROM balance_snapshots
-                WHERE currency = '$CUR'
-                  AND date(recorded_at) >= date('now', '-7 days')
-                  AND date(recorded_at) < date('now')
-            ),
-            daily_spend AS (
-                SELECT day, SUM(MAX(prev - topped_up_balance, 0)) AS spend
-                FROM consecutive
-                WHERE prev IS NOT NULL
-                GROUP BY day
-            )
-            SELECT COALESCE(ROUND(AVG(spend), 2), 0)
-            FROM daily_spend
-            WHERE spend > 0;
-        ")
+        # avg_daily helper: returns average daily spend in cents, then convert
+        avg_daily_spend_cents() {
+            local DAYS="$1"
+            sqlite3 "$DB_FILE" "
+                WITH consecutive AS (
+                    SELECT date(recorded_at) AS day,
+                           topped_up_balance_cents,
+                           LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+                    FROM balance_snapshots
+                    WHERE currency = '$CUR'
+                      AND date(recorded_at) >= date('now', '-${DAYS} days')
+                      AND date(recorded_at) < date('now')
+                ),
+                daily_spend AS (
+                    SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend
+                    FROM consecutive
+                    WHERE prev IS NOT NULL
+                    GROUP BY day
+                )
+                SELECT COALESCE(ROUND(AVG(spend)), 0)
+                FROM daily_spend
+                WHERE spend > 0;
+            "
+        }
 
-        # 30-day avg daily spend
-        AVG_30D=$(sqlite3 "$DB_FILE" "
-            WITH consecutive AS (
-                SELECT date(recorded_at) AS day,
-                       topped_up_balance,
-                       LAG(topped_up_balance) OVER (ORDER BY id) AS prev
-                FROM balance_snapshots
-                WHERE currency = '$CUR'
-                  AND date(recorded_at) >= date('now', '-30 days')
-                  AND date(recorded_at) < date('now')
-            ),
-            daily_spend AS (
-                SELECT day, SUM(MAX(prev - topped_up_balance, 0)) AS spend
-                FROM consecutive
-                WHERE prev IS NOT NULL
-                GROUP BY day
-            )
-            SELECT COALESCE(ROUND(AVG(spend), 2), 0)
-            FROM daily_spend
-            WHERE spend > 0;
-        ")
+        AVG_7D_CENTS=$(avg_daily_spend_cents 7)
+        AVG_30D_CENTS=$(avg_daily_spend_cents 30)
 
-        # Estimated days remaining (based on 30d avg)
+        AVG_7D=$(awk -v c="$AVG_7D_CENTS" 'BEGIN { printf "%.2f", c / 100.0 }')
+        AVG_30D=$(awk -v c="$AVG_30D_CENTS" 'BEGIN { printf "%.2f", c / 100.0 }')
+
+        # Estimated days remaining (based on 30d avg in cents)
         EST_DAYS="null"
-        if [ "$AVG_30D" != "0" ] && [ "$AVG_30D" != "0.00" ]; then
-            EST_DAYS=$(awk -v bal="$CURRENT" -v avg="$AVG_30D" \
+        if [ "$AVG_30D_CENTS" != "0" ]; then
+            EST_DAYS=$(awk -v bal="$CURRENT_CENTS" -v avg="$AVG_30D_CENTS" \
                 'BEGIN { printf "%d", bal / avg }' 2>/dev/null || echo "null")
             if [ -z "$EST_DAYS" ]; then
                 EST_DAYS="null"

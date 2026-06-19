@@ -50,15 +50,20 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
     currency TEXT NOT NULL,
-    total_balance REAL NOT NULL,
-    granted_balance REAL NOT NULL,
-    topped_up_balance REAL NOT NULL
+    total_balance_cents INTEGER NOT NULL,
+    granted_balance_cents INTEGER NOT NULL,
+    topped_up_balance_cents INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_currency_time
     ON balance_snapshots(currency, recorded_at);
 SQL
 
 # --- Parse and insert ------------------------------------------------------
+# Convert dollar strings to integer cents (e.g. "4.26" -> 426)
+dollars_to_cents() {
+    awk -v v="$1" 'BEGIN { printf "%d", (v + 0.0) * 100 + 0.5 }'
+}
+
 # Build a jq filter: if CURRENCY=both, keep all; else select only that currency
 if [ "$CURRENCY" = "both" ]; then
     JQ_FILTER='.balance_infos[]'
@@ -68,9 +73,12 @@ fi
 
 INSERTED=0
 while IFS='|' read -r currency total granted topped; do
+    total_cents=$(dollars_to_cents "$total")
+    granted_cents=$(dollars_to_cents "$granted")
+    topped_cents=$(dollars_to_cents "$topped")
     sqlite3 "$DB_FILE" \
-        "INSERT INTO balance_snapshots (currency, total_balance, granted_balance, topped_up_balance)
-         VALUES ('$currency', $total, $granted, $topped);"
+        "INSERT INTO balance_snapshots (currency, total_balance_cents, granted_balance_cents, topped_up_balance_cents)
+         VALUES ('$currency', $total_cents, $granted_cents, $topped_cents);"
     INSERTED=$((INSERTED + 1))
 done < <(echo "$BODY" | jq -r "$JQ_FILTER | \"\(.currency)|\(.total_balance)|\(.granted_balance)|\(.topped_up_balance)\"")
 
