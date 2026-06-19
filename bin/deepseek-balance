@@ -279,12 +279,12 @@ text_summary() {
 # --- Dispatch --------------------------------------------------------------
 case "$SUBCMD" in
     current)
-        [ "$OUTPUT_MODE" = "json" ] && json_current || text_current ;;
+        if [ "$OUTPUT_MODE" = "json" ]; then json_current; else text_current; fi ;;
     today)
-        [ "$OUTPUT_MODE" = "json" ] && json_today || text_today ;;
+        if [ "$OUTPUT_MODE" = "json" ]; then json_today; else text_today; fi ;;
     history)
-        [ "$OUTPUT_MODE" = "json" ] && json_history || text_history ;;
+        if [ "$OUTPUT_MODE" = "json" ]; then json_history; else text_history; fi ;;
     summary)
-        [ "$OUTPUT_MODE" = "json" ] && json_summary || text_summary ;;
+        if [ "$OUTPUT_MODE" = "json" ]; then json_summary; else text_summary; fi ;;
     *)  echo "deepseek-balance: unknown subcommand '$SUBCMD'" >&2; exit 2 ;;
 esac
