@@ -2,9 +2,8 @@
 Description=DeepSeek Balance Tracker — hourly poll
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*:*:00
 Persistent=true
-RandomizedDelaySec=120
 
 [Install]
 WantedBy=timers.target
