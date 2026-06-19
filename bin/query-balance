@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DB_FILE="/var/lib/deepseek-balance-tracker/balance.db"
+DB_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/deepseek-balance-tracker/balance.db"
 
 usage() {
     cat <<'EOF'

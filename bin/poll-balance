@@ -3,19 +3,20 @@ set -euo pipefail
 
 # --- Config ----------------------------------------------------------------
 : "${CURRENCY:=both}"
-DB_DIR="/var/lib/deepseek-balance-tracker"
+DB_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/deepseek-balance-tracker"
 DB_FILE="$DB_DIR/balance.db"
+SECRETS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/deepseek-balance/secrets.env"
 
 # --- API key ---------------------------------------------------------------
 if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-    if [ -f /etc/deepseek-balance/secrets.env ]; then
+    if [ -f "$SECRETS_FILE" ]; then
         # shellcheck source=/dev/null
-        source /etc/deepseek-balance/secrets.env
+        source "$SECRETS_FILE"
     fi
 fi
 
 if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-    echo "ERROR: DEEPSEEK_API_KEY is not set. Set it in the environment or in /etc/deepseek-balance/secrets.env" >&2
+    echo "ERROR: DEEPSEEK_API_KEY is not set. Set it in the environment or in $SECRETS_FILE" >&2
     exit 1
 fi
 

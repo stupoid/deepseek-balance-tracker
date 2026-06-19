@@ -2,6 +2,8 @@
 
 Lightweight shell-script service that polls the [DeepSeek API](https://api-docs.deepseek.com/api/get-user-balance) every hour and records your account balance into a SQLite database. Other programs can query the DB to check current balance and usage patterns.
 
+Runs entirely in userspace — no root needed.
+
 **Dependencies**: `curl`, `jq`, `sqlite3` — nothing else.
 
 ## Quick Start
@@ -11,24 +13,16 @@ Lightweight shell-script service that polls the [DeepSeek API](https://api-docs.
 ```bash
 # NixOS: add `sqlite` to environment.systemPackages and rebuild
 sudo nixos-rebuild switch
-
-# Other distros: install sqlite3
-sudo apt install sqlite3    # Debian/Ubuntu
-sudo pacman -S sqlite       # Arch
 ```
 
-### 2. Clone and set up secrets
+### 2. Set up secrets
 
 ```bash
-git clone https://github.com/... /home/kelvin/code/deepseek-balance-tracker
-cd /home/kelvin/code/deepseek-balance-tracker
-
-# Create secrets file
-sudo mkdir -p /etc/deepseek-balance
-sudo cp secrets.env.example /etc/deepseek-balance/secrets.env
-sudo chmod 600 /etc/deepseek-balance/secrets.env
-# Edit: put your real API key in the file
-sudo vim /etc/deepseek-balance/secrets.env
+mkdir -p ~/.config/deepseek-balance
+cp secrets.env.example ~/.config/deepseek-balance/secrets.env
+chmod 600 ~/.config/deepseek-balance/secrets.env
+# Edit with your real API key:
+vim ~/.config/deepseek-balance/secrets.env
 ```
 
 Your `secrets.env` should look like:
@@ -39,11 +33,13 @@ CURRENCY=both
 ```
 
 - `CURRENCY`: `USD`, `CNY`, or `both` (default)
-- You can also set `DEEPSEEK_API_KEY` in your environment for manual runs
+- You can also set `DEEPSEEK_API_KEY` in your environment for manual runs — the script checks the env var first
 
 ### 3. Test manually
 
 ```bash
+cd ~/code/deepseek-balance-tracker
+
 # Record your first snapshot
 ./bin/poll-balance
 
@@ -60,32 +56,39 @@ CURRENCY=both
 ./bin/query-balance summary
 ```
 
-### 4. Install systemd timer
+### 4. Install systemd user timer
 
 ```bash
-sudo cp etc/deepseek-balance.service /etc/systemd/system/
-sudo cp etc/deepseek-balance.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now deepseek-balance.timer
+mkdir -p ~/.config/systemd/user
+cp etc/deepseek-balance.service ~/.config/systemd/user/
+cp etc/deepseek-balance.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now deepseek-balance.timer
 
 # Verify it's running
-sudo systemctl status deepseek-balance.timer
-sudo systemctl status deepseek-balance.service
+systemctl --user status deepseek-balance.timer
+systemctl --user status deepseek-balance.service
 ```
 
-The timer fires every hour (`OnCalendar=hourly`). To change the interval, edit `/etc/systemd/system/deepseek-balance.timer` and run `sudo systemctl daemon-reload`.
+To ensure the timer runs even when you're not logged in, enable lingering:
+
+```bash
+loginctl enable-linger
+```
+
+The timer fires every hour (`OnCalendar=hourly`). To change the interval, edit `~/.config/systemd/user/deepseek-balance.timer` and run `systemctl --user daemon-reload`.
 
 ### 5. Check logs
 
 ```bash
-journalctl -u deepseek-balance.service -f
+journalctl --user -u deepseek-balance.service -f
 ```
 
 ## Usage Reference
 
 ### `poll-balance`
 
-No arguments. Reads config from environment or `/etc/deepseek-balance/secrets.env`.
+No arguments. Reads config from `$DEEPSEEK_API_KEY` env var, or falls back to `~/.config/deepseek-balance/secrets.env`.
 
 ```bash
 DEEPSEEK_API_KEY=sk-... CURRENCY=USD ./bin/poll-balance
@@ -127,7 +130,7 @@ Each snapshot records `topped_up_balance` (your paid balance). The difference be
 
 ## Database
 
-SQLite file at `/var/lib/deepseek-balance-tracker/balance.db`. Schema:
+SQLite file at `~/.local/share/deepseek-balance-tracker/balance.db`. Schema:
 
 ```sql
 CREATE TABLE balance_snapshots (
@@ -143,7 +146,7 @@ CREATE TABLE balance_snapshots (
 Query it directly:
 
 ```bash
-sqlite3 /var/lib/deepseek-balance-tracker/balance.db \
+sqlite3 ~/.local/share/deepseek-balance-tracker/balance.db \
   "SELECT * FROM balance_snapshots ORDER BY id DESC LIMIT 5;"
 ```
 
@@ -153,8 +156,8 @@ sqlite3 /var/lib/deepseek-balance-tracker/balance.db \
 |---|---|
 | `bin/poll-balance` | Fetch + record balance from API |
 | `bin/query-balance` | Query balance history and usage stats |
-| `etc/deepseek-balance.service` | systemd oneshot service |
-| `etc/deepseek-balance.timer` | systemd timer (hourly) |
-| `secrets.env.example` | Template for `/etc/deepseek-balance/secrets.env` |
-| `/var/lib/deepseek-balance-tracker/balance.db` | SQLite database (runtime) |
-| `/etc/deepseek-balance/secrets.env` | API key + config (runtime, chmod 600) |
+| `etc/deepseek-balance.service` | systemd user oneshot service |
+| `etc/deepseek-balance.timer` | systemd user timer (hourly) |
+| `secrets.env.example` | Template for `~/.config/deepseek-balance/secrets.env` |
+| `~/.local/share/deepseek-balance-tracker/balance.db` | SQLite database (runtime) |
+| `~/.config/deepseek-balance/secrets.env` | API key + config (runtime, chmod 600) |

@@ -5,10 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/deepseek-balance/secrets.env
-ExecStart=/home/kelvin/code/deepseek-balance-tracker/bin/poll-balance
+EnvironmentFile=%h/.config/deepseek-balance/secrets.env
+ExecStart=%h/code/deepseek-balance-tracker/bin/poll-balance
 
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=deepseek-balance

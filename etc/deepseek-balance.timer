@@ -1,12 +1,9 @@
 [Unit]
 Description=DeepSeek Balance Tracker — hourly poll
-Requires=deepseek-balance.service
 
 [Timer]
 OnCalendar=hourly
-# Fire immediately if the last scheduled trigger was missed (e.g., system was off)
 Persistent=true
-# Spread out from other hourly jobs slightly
 RandomizedDelaySec=120
 
 [Install]
