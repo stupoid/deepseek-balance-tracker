@@ -7,7 +7,7 @@ Records your balance every 5 minutes into a SQLite database. Then query it: *how
 ## Install
 
 ```bash
-git clone https://github.com/<you>/deepseek-balance-tracker.git
+git clone https://github.com/stupoid/deepseek-balance-tracker.git
 cd deepseek-balance-tracker
 
 # 1. Install sqlite3 if you don't have it (apt, pacman, brew, nix — whatever)
