@@ -30,6 +30,12 @@ DB_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/deepseek-balance-tracker"
 DB_FILE="$DB_DIR/balance.db"
 SECRETS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/deepseek-balance/secrets.env"
 
+# Validate currency
+if [[ ! "$CURRENCY" =~ ^(USD|CNY|both)$ ]]; then
+    echo "ERROR: invalid CURRENCY '$CURRENCY' — must be USD, CNY, or both" >&2
+    exit 1
+fi
+
 # --- API key ---------------------------------------------------------------
 if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
     if [ -f "$SECRETS_FILE" ]; then
@@ -103,6 +109,8 @@ if [ "$INSERTED" -eq 0 ]; then
 fi
 
 # --- Enforce row cap ---------------------------------------------------------
+TOTAL=0
+DELETED=0
 if [ "$MAX_ROWS" -gt 0 ] 2>/dev/null; then
     TOTAL=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM balance_snapshots;")
     if [ "$TOTAL" -gt "$MAX_ROWS" ]; then
@@ -110,11 +118,7 @@ if [ "$MAX_ROWS" -gt 0 ] 2>/dev/null; then
             "SELECT COALESCE(MAX(id) - $MAX_ROWS, 0) FROM balance_snapshots;")
         DELETED=$(sqlite3 "$DB_FILE" \
             "DELETE FROM balance_snapshots WHERE id <= $CUTOFF; SELECT changes();")
-    else
-        DELETED=0
     fi
-else
-    DELETED=0
 fi
 
 echo "OK: inserted $INSERTED balance snapshot(s) (CURRENCY=$CURRENCY; rows=$TOTAL/$MAX_ROWS; deleted=$DELETED)"

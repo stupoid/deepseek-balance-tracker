@@ -224,6 +224,28 @@ OUT=$(run_query current)
 assert_contains "text is not JSON" "$OUT" "\$4.26"
 assert_not_contains "text has no brackets" "$OUT" "["
 
+# --- Tests: recent (last hour) -----------------------------------------------
+
+echo "=== Recent ==="
+setup_db
+# Simulate snapshots over the last 2 hours (use relative timestamps in SQL)
+sqlite3 "$DB_FILE" <<'SQL'
+INSERT INTO balance_snapshots (currency, total_balance_cents, granted_balance_cents, topped_up_balance_cents, recorded_at)
+VALUES
+  ('USD', 500, 0, 500, unixepoch('now', '-65 minutes')),
+  ('USD', 450, 0, 450, unixepoch('now', '-55 minutes')),
+  ('USD', 430, 0, 430, unixepoch('now', '-45 minutes')),
+  ('USD', 420, 0, 420, unixepoch('now', '-35 minutes'));
+SQL
+
+OUT=$(run_query recent)
+# 3 rows inside 60-min window (450→430→420). Only 2 deltas: 450-430=20¢ + 430-420=10¢ = 30¢
+assert_contains "recent detects spend in last hour" "$OUT" "spent \$0.30"
+assert_contains "recent shows snapshot count" "$OUT" "3 snapshots"
+
+OUT=$(run_query -j recent)
+assert_json_key "json recent spend" "$OUT" '.USD.spend_last_hour' "0.30"
+
 # --- Tests: edge cases -----------------------------------------------------
 
 echo "=== Edge cases ==="

@@ -14,6 +14,7 @@ Usage:
 Subcommands:
   current         Latest balance per currency (total, granted, topped-up)
   today           Total spend today in UTC (sum of balance decreases)
+  recent          Total spend in the last 60 minutes
   history [N]     Last N balance snapshots (default: 24)
   summary         Averages over 7d/30d, estimated days remaining, days tracked
 
@@ -30,12 +31,14 @@ Exit codes:
 Examples for bots/scripts (always use -j):
   deepseek-balance -j current | jq '.[0].topped_up_balance'
   deepseek-balance -j -c USD today | jq '.USD.spend_today'
+  deepseek-balance -j -c USD recent | jq '.USD.spend_last_hour'
   deepseek-balance -j summary | jq '.USD.estimated_days_left'
   deepseek-balance -j history 5
 
 Human-readable examples:
   deepseek-balance current
   deepseek-balance -c USD today
+  deepseek-balance recent
   deepseek-balance history 10
   deepseek-balance summary
 
@@ -61,6 +64,16 @@ shift $((OPTIND - 1))
 SUBCMD="${1:-}"
 N="${2:-24}"
 
+# Validate inputs
+if [[ ! "$CURRENCY" =~ ^(USD|CNY|both)$ ]]; then
+    echo "deepseek-balance: invalid currency '$CURRENCY' — must be USD, CNY, or both" >&2
+    exit 2
+fi
+if [[ ! "$N" =~ ^[0-9]+$ ]]; then
+    echo "deepseek-balance: invalid count '$N' — must be a positive integer" >&2
+    exit 2
+fi
+
 if [ -z "$SUBCMD" ]; then usage; fi
 if [ ! -f "$DB_FILE" ]; then
     echo "deepseek-balance: no data yet — run deepseek-balance-poll first" >&2
@@ -78,6 +91,44 @@ get_currencies() {
 
 cents_to_dollars() {
     awk -v c="$1" 'BEGIN { printf "%.2f", c / 100.0 }'
+}
+
+# Compute spend in cents for a given currency over a time window.
+# Usage: avg_spend_cents <currency> <minutes>
+# Returns total spend (positive deltas only) in cents.
+spend_in_window_cents() {
+    local cur="$1" minutes="$2"
+    sqlite3 "$DB_FILE" "
+        WITH ordered AS (
+            SELECT topped_up_balance_cents,
+                   LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+            FROM balance_snapshots
+            WHERE currency = '$cur'
+              AND recorded_at >= unixepoch('now', '-${minutes} minutes')
+        )
+        SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
+        FROM ordered WHERE prev IS NOT NULL;"
+}
+
+# Average daily spend (in cents) over N days for a currency.
+avg_daily_spend_cents() {
+    local cur="$1" days="$2"
+    sqlite3 "$DB_FILE" "
+        WITH consecutive AS (
+            SELECT date(recorded_at, 'unixepoch') AS day,
+                   topped_up_balance_cents,
+                   LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+            FROM balance_snapshots
+            WHERE currency = '$cur'
+              AND date(recorded_at, 'unixepoch') >= date('now', '-${days} days')
+              AND date(recorded_at, 'unixepoch') < date('now')
+        ),
+        daily_spend AS (
+            SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend
+            FROM consecutive WHERE prev IS NOT NULL GROUP BY day
+        )
+        SELECT COALESCE(ROUND(AVG(spend)), 0)
+        FROM daily_spend WHERE spend > 0;"
 }
 
 # --- JSON output functions (reuse existing JSON logic) ---------------------
@@ -151,33 +202,15 @@ json_summary() {
     for CUR in $(get_currencies); do
         [ "$first" = 1 ] || echo ","
         first=0
-        local cc dt
+        local cc dt a7 a30
         cc=$(sqlite3 "$DB_FILE" \
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
         dt=$(sqlite3 "$DB_FILE" \
             "SELECT COUNT(DISTINCT date(recorded_at, 'unixepoch'))
              FROM balance_snapshots WHERE currency = '$CUR';")
-        avg() {
-            sqlite3 "$DB_FILE" "
-                WITH consecutive AS (
-                    SELECT date(recorded_at, 'unixepoch') AS day,
-                           topped_up_balance_cents,
-                           LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
-                    FROM balance_snapshots
-                    WHERE currency = '$CUR'
-                      AND date(recorded_at, 'unixepoch') >= date('now', '-$1 days')
-                      AND date(recorded_at, 'unixepoch') < date('now')
-                ),
-                daily_spend AS (
-                    SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend
-                    FROM consecutive WHERE prev IS NOT NULL GROUP BY day
-                )
-                SELECT COALESCE(ROUND(AVG(spend)), 0)
-                FROM daily_spend WHERE spend > 0;"
-        }
-        local a7 a30
-        a7=$(avg 7); a30=$(avg 30)
+        a7=$(avg_daily_spend_cents "$CUR" 7)
+        a30=$(avg_daily_spend_cents "$CUR" 30)
         local ed="null"
         [ "$a30" != "0" ] && ed=$(awk -v b="$cc" -v a="$a30" 'BEGIN { printf "%d", b / a }')
         printf '  "%s": {' "$CUR"
@@ -190,6 +223,40 @@ json_summary() {
     done
     echo ""
     echo "}"
+}
+
+# --- JSON: recent ----------------------------------------------------------
+json_recent() {
+    echo "{"
+    local first=1
+    for CUR in $(get_currencies); do
+        [ "$first" = 1 ] || echo ","
+        first=0
+        local sc rc
+        sc=$(spend_in_window_cents "$CUR" 60)
+        rc=$(sqlite3 "$DB_FILE" \
+            "SELECT COUNT(*) FROM balance_snapshots
+             WHERE currency = '$CUR'
+               AND recorded_at >= unixepoch('now', '-60 minutes');")
+        printf '  "%s": {"spend_last_hour": %s, "snapshots": %s}' \
+            "$CUR" "$(cents_to_dollars "$sc")" "$rc"
+    done
+    echo ""
+    echo "}"
+}
+
+# --- Text: recent ----------------------------------------------------------
+text_recent() {
+    for CUR in $(get_currencies); do
+        local sc rc
+        sc=$(spend_in_window_cents "$CUR" 60)
+        rc=$(sqlite3 "$DB_FILE" \
+            "SELECT COUNT(*) FROM balance_snapshots
+             WHERE currency = '$CUR'
+               AND recorded_at >= unixepoch('now', '-60 minutes');")
+        printf "%-4s spent \$%s in the last hour  (%s snapshots)\n" \
+            "$CUR" "$(cents_to_dollars "$sc")" "$rc"
+    done
 }
 
 # --- Text output functions -------------------------------------------------
@@ -238,33 +305,15 @@ text_history() {
 
 text_summary() {
     for CUR in $(get_currencies); do
-        local cc dt
+        local cc dt a7 a30
         cc=$(sqlite3 "$DB_FILE" \
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
         dt=$(sqlite3 "$DB_FILE" \
             "SELECT COUNT(DISTINCT date(recorded_at, 'unixepoch'))
              FROM balance_snapshots WHERE currency = '$CUR';")
-        avg() {
-            sqlite3 "$DB_FILE" "
-                WITH consecutive AS (
-                    SELECT date(recorded_at, 'unixepoch') AS day,
-                           topped_up_balance_cents,
-                           LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
-                    FROM balance_snapshots
-                    WHERE currency = '$CUR'
-                      AND date(recorded_at, 'unixepoch') >= date('now', '-$1 days')
-                      AND date(recorded_at, 'unixepoch') < date('now')
-                ),
-                daily_spend AS (
-                    SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend
-                    FROM consecutive WHERE prev IS NOT NULL GROUP BY day
-                )
-                SELECT COALESCE(ROUND(AVG(spend)), 0)
-                FROM daily_spend WHERE spend > 0;"
-        }
-        local a7 a30
-        a7=$(avg 7); a30=$(avg 30)
+        a7=$(avg_daily_spend_cents "$CUR" 7)
+        a30=$(avg_daily_spend_cents "$CUR" 30)
         printf "%-4s balance \$%s  avg \$%s/day (7d)  \$%s/day (30d)" \
             "$CUR" "$(cents_to_dollars "$cc")" "$(cents_to_dollars "$a7")" "$(cents_to_dollars "$a30")"
         if [ "$a30" != "0" ]; then
@@ -282,6 +331,8 @@ case "$SUBCMD" in
         if [ "$OUTPUT_MODE" = "json" ]; then json_current; else text_current; fi ;;
     today)
         if [ "$OUTPUT_MODE" = "json" ]; then json_today; else text_today; fi ;;
+    recent)
+        if [ "$OUTPUT_MODE" = "json" ]; then json_recent; else text_recent; fi ;;
     history)
         if [ "$OUTPUT_MODE" = "json" ]; then json_history; else text_history; fi ;;
     summary)

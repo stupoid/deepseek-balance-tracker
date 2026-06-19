@@ -81,6 +81,7 @@ deepseek-balance -j summary | jq '.USD.estimated_days_left'
 |---|---|
 | `deepseek-balance current` | Latest balance per currency |
 | `deepseek-balance today` | Total spend today (UTC) |
+| `deepseek-balance recent` | Total spend in the last 60 minutes |
 | `deepseek-balance history [N]` | Last N snapshots (default 24) |
 | `deepseek-balance summary` | 7d/30d averages, days remaining |
 | `deepseek-balance-poll` | Fetch from API and record (called by timer) |
