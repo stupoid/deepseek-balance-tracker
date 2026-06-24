@@ -91,6 +91,8 @@ run_query() {
     "$BIN" "$@"
 }
 
+today_at() { date +"%Y-%m-%d $1"; }
+
 # --- Tests: empty DB -------------------------------------------------------
 
 echo "=== Empty DB ==="
@@ -124,12 +126,12 @@ assert_json_key "json current currency" "$OUT" '.[0].currency' 'USD'
 
 echo "=== Multiple snapshots ==="
 setup_db
-# Day 1: balance $5.00 → $4.50 (spent $0.50), then top-up to $6.00
-insert_row "USD" 500 0 500 "2026-06-19 08:00:00"
-insert_row "USD" 450 0 450 "2026-06-19 08:05:00"
-insert_row "USD" 600 0 600 "2026-06-19 08:10:00"  # top-up
-# Day 1 continued: $6.00 → $5.75 (spent $0.25)
-insert_row "USD" 575 0 575 "2026-06-19 08:15:00"
+# Today: balance $5.00 → $4.50 (spent $0.50), then top-up to $6.00
+insert_row "USD" 500 0 500 "$(today_at '08:00:00')"
+insert_row "USD" 450 0 450 "$(today_at '08:05:00')"
+insert_row "USD" 600 0 600 "$(today_at '08:10:00')"  # top-up
+# $6.00 → $5.75 (spent $0.25)
+insert_row "USD" 575 0 575 "$(today_at '08:15:00')"
 
 OUT=$(run_query today)
 assert_contains "today detects spend correctly" "$OUT" "spent \$0.75"
@@ -202,9 +204,9 @@ assert_json_key "json summary days" "$OUT" '.USD.days_tracked' "5"
 
 echo "=== Top-up handling ==="
 setup_db
-insert_row "USD" 500 0 500 "2026-06-19 10:00:00"
-insert_row "USD" 400 0 400 "2026-06-19 10:05:00"  # spent $1.00
-insert_row "USD" 900 0 900 "2026-06-19 10:10:00"  # topped up $5.00 — should NOT be counted
+insert_row "USD" 500 0 500 "$(today_at '10:00:00')"
+insert_row "USD" 400 0 400 "$(today_at '10:05:00')"  # spent $1.00
+insert_row "USD" 900 0 900 "$(today_at '10:10:00')"  # topped up $5.00 — should NOT be counted
 
 OUT=$(run_query today)
 assert_contains "top-up ignored in spend" "$OUT" "spent \$1.00"
@@ -458,6 +460,64 @@ if echo "$STATE_AFTER" | grep -q "USD:ok"; then
     PASS=$((PASS + 1))
 else
     echo "  FAIL poll alert did not re-arm (state: $STATE_AFTER)"
+    FAIL=$((FAIL + 1))
+fi
+
+# --- Tests: RETENTION_DAYS pruning -----------------------------------------
+
+echo "=== Retention pruning ==="
+
+# Set up mock curl that returns a simple balance
+cat > "$MOCK_CURL" <<'CURLEOF'
+#!/usr/bin/env bash
+echo '{"balance_infos":[{"currency":"USD","total_balance":"10.00","granted_balance":"0.00","topped_up_balance":"10.00"}]}'
+echo "200"
+CURLEOF
+
+# Secrets file with retention enabled
+cat > "$TMPDIR/config/deepseek-balance/secrets.env" <<EOF
+DEEPSEEK_API_KEY=sk-test
+CURRENCY=both
+RETENTION_DAYS=90
+EOF
+
+# DB with old data (100 days ago) and recent data (today)
+setup_db
+sqlite3 "$DB_FILE" <<SQL
+INSERT INTO balance_snapshots (currency, total_balance_cents, granted_balance_cents, topped_up_balance_cents, recorded_at)
+VALUES
+  ('USD', 1000, 0, 1000, unixepoch('now', '-100 days')),
+  ('USD', 900, 0, 900,  unixepoch('now', '-100 days')),
+  ('USD', 1100, 0, 1100, unixepoch('now', '-1 day')),
+  ('USD', 1050, 0, 1050, unixepoch('now', '-1 day'));
+SQL
+
+OLD_COUNT_BEFORE=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM balance_snapshots WHERE recorded_at < unixepoch('now', '-90 days');")
+RECENT_COUNT_BEFORE=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM balance_snapshots WHERE recorded_at >= unixepoch('now', '-90 days');")
+
+# Run the poll with retention
+PATH="$TMPDIR:$PATH" \
+  XDG_DATA_HOME="$XDG_DATA_HOME" \
+  XDG_CONFIG_HOME="$TMPDIR/config" \
+  XDG_STATE_HOME="$TMPDIR/state" \
+  bash "$PROJECT_DIR/bin/deepseek-balance-poll" >/dev/null 2>&1 || true
+
+OLD_COUNT_AFTER=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM balance_snapshots WHERE recorded_at < unixepoch('now', '-90 days');")
+RECENT_COUNT_AFTER=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM balance_snapshots WHERE recorded_at >= unixepoch('now', '-90 days');")
+
+if [ "$OLD_COUNT_BEFORE" -gt 0 ] && [ "$OLD_COUNT_AFTER" -eq 0 ]; then
+    echo "  PASS retention deletes old rows (was $OLD_COUNT_BEFORE, now $OLD_COUNT_AFTER)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL retention did not delete old rows (before=$OLD_COUNT_BEFORE, after=$OLD_COUNT_AFTER)"
+    FAIL=$((FAIL + 1))
+fi
+
+if [ "$RECENT_COUNT_AFTER" -gt 0 ]; then
+    echo "  PASS retention keeps recent rows ($RECENT_COUNT_AFTER surviving)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL retention deleted recent rows too"
     FAIL=$((FAIL + 1))
 fi
 

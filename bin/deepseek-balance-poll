@@ -29,6 +29,7 @@ fi
 # --- Config ----------------------------------------------------------------
 : "${CURRENCY:=both}"
 : "${MAX_ROWS:=1000000}"
+: "${RETENTION_DAYS:=0}"
 DB_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/deepseek-balance-tracker"
 DB_FILE="$DB_DIR/balance.db"
 SECRETS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/deepseek-balance/secrets.env"
@@ -70,6 +71,7 @@ fi
 
 # --- Create table if not exists --------------------------------------------
 sqlite3 "$DB_FILE" <<'SQL'
+PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS balance_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     recorded_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -124,7 +126,14 @@ if [ "$MAX_ROWS" -gt 0 ] 2>/dev/null; then
     fi
 fi
 
-echo "OK: inserted $INSERTED balance snapshot(s) (CURRENCY=$CURRENCY; rows=$TOTAL/$MAX_ROWS; deleted=$DELETED)"
+# --- Enforce retention (age-based pruning) ------------------------------------
+RETENTION_DELETED=0
+if [ "${RETENTION_DAYS:-0}" -gt 0 ] 2>/dev/null; then
+    RETENTION_DELETED=$(sqlite3 "$DB_FILE" \
+        "DELETE FROM balance_snapshots WHERE recorded_at < unixepoch('now', '-${RETENTION_DAYS} days'); SELECT changes();")
+fi
+
+echo "OK: inserted $INSERTED balance snapshot(s) (CURRENCY=$CURRENCY; rows=$TOTAL/$MAX_ROWS; deleted=$DELETED; retention_deleted=$RETENTION_DELETED)"
 # --- Alert check -------------------------------------------------------------
 ALERT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/deepseek-balance-tracker"
 ALERT_STATE_FILE="$ALERT_STATE_DIR/alert-state"
@@ -135,13 +144,13 @@ mkdir -p "$ALERT_STATE_DIR"
 # Env vars take priority — only read from file if var is not already set.
 if [ -f "$SECRETS_FILE" ]; then
     if [ -z "${ALERT_THRESHOLD_USD+set}" ]; then
-        ALERT_THRESHOLD_USD=$(grep -oP '^ALERT_THRESHOLD_USD=\K.*' "$SECRETS_FILE" 2>/dev/null || echo "")
+        ALERT_THRESHOLD_USD=$(sed -n 's/^ALERT_THRESHOLD_USD=//p' "$SECRETS_FILE" 2>/dev/null || echo "")
     fi
     if [ -z "${ALERT_THRESHOLD_CNY+set}" ]; then
-        ALERT_THRESHOLD_CNY=$(grep -oP '^ALERT_THRESHOLD_CNY=\K.*' "$SECRETS_FILE" 2>/dev/null || echo "")
+        ALERT_THRESHOLD_CNY=$(sed -n 's/^ALERT_THRESHOLD_CNY=//p' "$SECRETS_FILE" 2>/dev/null || echo "")
     fi
     if [ -z "${ALERT_COMMAND+set}" ]; then
-        ALERT_COMMAND=$(grep -oP '^ALERT_COMMAND=\K.*' "$SECRETS_FILE" 2>/dev/null || echo "")
+        ALERT_COMMAND=$(sed -n 's/^ALERT_COMMAND=//p' "$SECRETS_FILE" 2>/dev/null || echo "")
     fi
 fi
 

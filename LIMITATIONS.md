@@ -46,9 +46,9 @@ If the DeepSeek API is unreachable, the poll fails (exit code 2) and no snapshot
 
 ### SQLite locking
 
-SQLite uses single-writer locking. If `deepseek-balance` (reader) runs at the exact same moment as `deepseek-balance-poll` (writer), the reader may get `SQLITE_BUSY` and fail. In practice this is extremely rare with WAL mode and sub-millisecond transactions.
+SQLite uses single-writer locking. If `deepseek-balance` (reader) runs at the exact same moment as `deepseek-balance-poll` (writer), the reader may get `SQLITE_BUSY` and fail. WAL mode is enabled (via `PRAGMA journal_mode=WAL` on table creation), which allows concurrent readers during a write, making this extremely rare in practice.
 
-**Mitigation**: could add `.timeout 5000` to the sqlite3 invocations if this becomes an issue.
+**Mitigation**: could add `.timeout 5000` to the sqlite3 invocations if this becomes an issue under extreme concurrency.
 
 ### New currencies
 

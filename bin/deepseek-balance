@@ -337,13 +337,13 @@ _load_alert_thresholds() {
         if [ -f "$secrets" ]; then
             # Read threshold/command from file, but only if env didn't already provide them
             if [ -z "${ALERT_THRESHOLD_USD+set}" ]; then
-                ALERT_THRESHOLD_USD=$(grep -oP '^ALERT_THRESHOLD_USD=\K.*' "$secrets" 2>/dev/null || echo "")
+                ALERT_THRESHOLD_USD=$(sed -n 's/^ALERT_THRESHOLD_USD=//p' "$secrets" 2>/dev/null || echo "")
             fi
             if [ -z "${ALERT_THRESHOLD_CNY+set}" ]; then
-                ALERT_THRESHOLD_CNY=$(grep -oP '^ALERT_THRESHOLD_CNY=\K.*' "$secrets" 2>/dev/null || echo "")
+                ALERT_THRESHOLD_CNY=$(sed -n 's/^ALERT_THRESHOLD_CNY=//p' "$secrets" 2>/dev/null || echo "")
             fi
             if [ -z "${ALERT_COMMAND+set}" ]; then
-                ALERT_COMMAND=$(grep -oP '^ALERT_COMMAND=\K.*' "$secrets" 2>/dev/null || echo "")
+                ALERT_COMMAND=$(sed -n 's/^ALERT_COMMAND=//p' "$secrets" 2>/dev/null || echo "")
             fi
         fi
         ALERT_THRESHOLD_USD_LOADED=1
