@@ -6,7 +6,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=%h/.config/deepseek-balance/secrets.env
-Environment=PATH=/run/current-system/sw/bin:%h/.nix-profile/bin:/etc/profiles/per-user/%U/bin:/usr/local/bin:/usr/bin:/bin
+# PATH: adjust to your distribution if the defaults below don't cover all
+# dependencies (curl, jq, sqlite3 must be on PATH).
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# ExecStart: adjust this path to where you cloned the repository.
 ExecStart=%h/code/deepseek-balance-tracker/bin/deepseek-balance-poll
 
 StandardOutput=journal
