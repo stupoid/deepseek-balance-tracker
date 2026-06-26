@@ -75,7 +75,7 @@ if [ "$HTTP_CODE" != "200" ]; then
 fi
 
 # --- Create table if not exists --------------------------------------------
-sqlite3 "$DB_FILE" <<'SQL'
+sqlite3 "$DB_FILE" >/dev/null <<'SQL'
 PRAGMA busy_timeout=5000;
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS balance_snapshots (
