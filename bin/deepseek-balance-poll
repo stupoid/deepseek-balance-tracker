@@ -56,6 +56,10 @@ fi
 # --- Ensure DB dir exists --------------------------------------------------
 mkdir -p "$DB_DIR"
 
+# sqlite3 wrapper with busy timeout (ms) — prevents instant failure if a
+# reader is mid-query during a WAL checkpoint.
+db() { sqlite3 "$DB_FILE" ".timeout 5000" "$@"; }
+
 # --- Fetch balance from API ------------------------------------------------
 RESPONSE=$(curl -s -w '\n%{http_code}' \
     -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
@@ -71,6 +75,7 @@ fi
 
 # --- Create table if not exists --------------------------------------------
 sqlite3 "$DB_FILE" <<'SQL'
+PRAGMA busy_timeout=5000;
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS balance_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +118,7 @@ while IFS='|' read -r currency total granted topped; do
 done < <(echo "$BODY" | jq -r "$JQ_FILTER | \"\(.currency)|\(.total_balance)|\(.granted_balance)|\(.topped_up_balance)\"")
 
 if [ "$INSERTED" -gt 0 ]; then
-    printf '%s' "$SQL_BATCH" | sqlite3 "$DB_FILE"
+    printf '.timeout 5000\n%s' "$SQL_BATCH" | sqlite3 "$DB_FILE"
 fi
 
 if [ "$INSERTED" -eq 0 ]; then
@@ -125,11 +130,11 @@ fi
 TOTAL=0
 DELETED=0
 if [ "$MAX_ROWS" -gt 0 ] 2>/dev/null; then
-    TOTAL=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM balance_snapshots;")
+    TOTAL=$(db "SELECT COUNT(*) FROM balance_snapshots;")
     if [ "$TOTAL" -gt "$MAX_ROWS" ]; then
-        CUTOFF=$(sqlite3 "$DB_FILE" \
+        CUTOFF=$(db \
             "SELECT COALESCE(MAX(id) - $MAX_ROWS, 0) FROM balance_snapshots;")
-        DELETED=$(sqlite3 "$DB_FILE" \
+        DELETED=$(db \
             "DELETE FROM balance_snapshots WHERE id <= $CUTOFF; SELECT changes();")
     fi
 fi
@@ -137,7 +142,7 @@ fi
 # --- Enforce retention (age-based pruning) ------------------------------------
 RETENTION_DELETED=0
 if [ "${RETENTION_DAYS:-0}" -gt 0 ] 2>/dev/null; then
-    RETENTION_DELETED=$(sqlite3 "$DB_FILE" \
+    RETENTION_DELETED=$(db \
         "DELETE FROM balance_snapshots WHERE recorded_at < unixepoch('now', '-${RETENTION_DAYS} days'); SELECT changes();")
 fi
 
@@ -176,7 +181,7 @@ run_alert_check() {
 
         # Get latest topped_up_balance in cents
         local balance_cents
-        balance_cents=$(sqlite3 "$DB_FILE" \
+        balance_cents=$(db \
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$currency' ORDER BY id DESC LIMIT 1;")
         [ -n "$balance_cents" ] || exit 0  # No data yet

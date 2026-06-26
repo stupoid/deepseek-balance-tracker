@@ -83,9 +83,17 @@ if [ ! -f "$DB_FILE" ]; then
 fi
 
 # --- Helpers ---------------------------------------------------------------
+cents_to_dollars() {
+    awk -v c="$1" 'BEGIN { printf "%.2f", c / 100.0 }'
+}
+
+# sqlite3 wrapper with busy timeout (ms) — prevents instant failure if the
+# poll writer is mid-commit during a WAL checkpoint.
+db() { sqlite3 "$DB_FILE" ".timeout 5000" "$@"; }
+
 get_currencies() {
     if [ "$CURRENCY" = "both" ]; then
-        sqlite3 "$DB_FILE" "SELECT DISTINCT currency FROM balance_snapshots ORDER BY currency;" \
+        db "SELECT DISTINCT currency FROM balance_snapshots ORDER BY currency;" \
             | while read -r c; do
                 case "$c" in USD|CNY) echo "$c" ;; *) ;; esac
               done
@@ -94,16 +102,12 @@ get_currencies() {
     fi
 }
 
-cents_to_dollars() {
-    awk -v c="$1" 'BEGIN { printf "%.2f", c / 100.0 }'
-}
-
 # Compute spend in cents for a given currency over a time window.
 # Usage: avg_spend_cents <currency> <minutes>
 # Returns total spend (positive deltas only) in cents.
 spend_in_window_cents() {
     local cur="$1" minutes="$2"
-    sqlite3 "$DB_FILE" "
+    db "
         WITH ordered AS (
             SELECT topped_up_balance_cents, recorded_at,
                    LAG(topped_up_balance_cents) OVER (ORDER BY recorded_at) AS prev
@@ -119,7 +123,7 @@ spend_in_window_cents() {
 # Average daily spend (in cents) over N days for a currency.
 avg_daily_spend_cents() {
     local cur="$1" days="$2"
-    sqlite3 "$DB_FILE" "
+    db "
         WITH consecutive AS (
             SELECT recorded_at / 86400 AS day,
                    topped_up_balance_cents, recorded_at,
@@ -155,7 +159,7 @@ json_current() {
         [ "$first" = 1 ] || echo ","
         first=0
         json_balance_row "$c" "$tc" "$gc" "$pc" "$ts"
-    done < <(sqlite3 -separator '|' "$DB_FILE" \
+    done < <(sqlite3 -separator '|' "$DB_FILE" ".timeout 5000" \
         "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,datetime(recorded_at, 'unixepoch') AS recorded_at
          FROM balance_snapshots $where ORDER BY currency;")
     echo ""
@@ -169,7 +173,7 @@ json_today() {
         [ "$first" = 1 ] || echo ","
         first=0
         local sc rc
-        sc=$(sqlite3 "$DB_FILE" "
+        sc=$(db "
             WITH ordered AS (
                 SELECT topped_up_balance_cents, recorded_at,
                        LAG(topped_up_balance_cents) OVER (ORDER BY recorded_at) AS prev
@@ -181,7 +185,7 @@ json_today() {
             WHERE prev IS NOT NULL
               AND recorded_at >= unixepoch('now', 'start of day')
               AND recorded_at < unixepoch('now', 'start of day', '+1 day');")
-        rc=$(sqlite3 "$DB_FILE" \
+        rc=$(db \
             "SELECT COUNT(*) FROM balance_snapshots
              WHERE currency = '$CUR'
                AND recorded_at >= unixepoch('now', 'start of day')
@@ -202,7 +206,7 @@ json_history() {
         [ "$first" = 1 ] || echo ","
         first=0
         json_balance_row "$c" "$tc" "$gc" "$pc" "$ts"
-    done < <(sqlite3 -separator '|' "$DB_FILE" \
+    done < <(sqlite3 -separator '|' "$DB_FILE" ".timeout 5000" \
         "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,datetime(recorded_at, 'unixepoch') AS recorded_at
          FROM balance_snapshots $where ORDER BY id DESC LIMIT $N;")
     echo ""
@@ -216,10 +220,10 @@ json_summary() {
         [ "$first" = 1 ] || echo ","
         first=0
         local cc dt a7 a30
-        cc=$(sqlite3 "$DB_FILE" \
+        cc=$(db \
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
-        dt=$(sqlite3 "$DB_FILE" \
+        dt=$(db \
             "SELECT COUNT(DISTINCT recorded_at / 86400)
              FROM balance_snapshots WHERE currency = '$CUR';")
         a7=$(avg_daily_spend_cents "$CUR" 7)
@@ -247,7 +251,7 @@ json_recent() {
         first=0
         local sc rc
         sc=$(spend_in_window_cents "$CUR" 60)
-        rc=$(sqlite3 "$DB_FILE" \
+        rc=$(db \
             "SELECT COUNT(*) FROM balance_snapshots
              WHERE currency = '$CUR'
                AND recorded_at >= unixepoch('now', '-60 minutes');")
@@ -263,7 +267,7 @@ text_recent() {
     for CUR in $(get_currencies); do
         local sc rc
         sc=$(spend_in_window_cents "$CUR" 60)
-        rc=$(sqlite3 "$DB_FILE" \
+        rc=$(db \
             "SELECT COUNT(*) FROM balance_snapshots
              WHERE currency = '$CUR'
                AND recorded_at >= unixepoch('now', '-60 minutes');")
@@ -280,7 +284,7 @@ text_current() {
     while IFS='|' read -r c tc gc pc ts; do
         printf "%-4s \$%-8s total  \$%-8s granted  \$%-8s topped-up  (%s)\n" \
             "$c" "$(cents_to_dollars "$tc")" "$(cents_to_dollars "$gc")" "$(cents_to_dollars "$pc")" "$ts"
-    done < <(sqlite3 -separator '|' "$DB_FILE" \
+    done < <(sqlite3 -separator '|' "$DB_FILE" ".timeout 5000" \
         "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,datetime(recorded_at, 'unixepoch') AS recorded_at
          FROM balance_snapshots $where ORDER BY currency;")
 }
@@ -288,7 +292,7 @@ text_current() {
 text_today() {
     for CUR in $(get_currencies); do
         local sc rc
-        sc=$(sqlite3 "$DB_FILE" "
+        sc=$(db "
             WITH ordered AS (
                 SELECT topped_up_balance_cents, recorded_at,
                        LAG(topped_up_balance_cents) OVER (ORDER BY recorded_at) AS prev
@@ -300,7 +304,7 @@ text_today() {
             WHERE prev IS NOT NULL
               AND recorded_at >= unixepoch('now', 'start of day')
               AND recorded_at < unixepoch('now', 'start of day', '+1 day');")
-        rc=$(sqlite3 "$DB_FILE" \
+        rc=$(db \
             "SELECT COUNT(*) FROM balance_snapshots
              WHERE currency = '$CUR'
                AND recorded_at >= unixepoch('now', 'start of day')
@@ -316,7 +320,7 @@ text_history() {
     printf "%-4s %-8s %s\n" "CUR" "BALANCE" "RECORDED AT"
     while IFS='|' read -r c _ _ pc ts; do
         printf "%-4s \$%-8s %s\n" "$c" "$(cents_to_dollars "$pc")" "$ts"
-    done < <(sqlite3 -separator '|' "$DB_FILE" \
+    done < <(sqlite3 -separator '|' "$DB_FILE" ".timeout 5000" \
         "SELECT currency,total_balance_cents,granted_balance_cents,topped_up_balance_cents,datetime(recorded_at, 'unixepoch') AS recorded_at
          FROM balance_snapshots $where ORDER BY id DESC LIMIT $N;")
 }
@@ -324,10 +328,10 @@ text_history() {
 text_summary() {
     for CUR in $(get_currencies); do
         local cc dt a7 a30
-        cc=$(sqlite3 "$DB_FILE" \
+        cc=$(db \
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
-        dt=$(sqlite3 "$DB_FILE" \
+        dt=$(db \
             "SELECT COUNT(DISTINCT recorded_at / 86400)
              FROM balance_snapshots WHERE currency = '$CUR';")
         a7=$(avg_daily_spend_cents "$CUR" 7)
@@ -378,7 +382,7 @@ json_check_alert() {
         if [ -z "$thr" ]; then
             printf '  "%s": {"balance": null, "threshold": null, "alert": false}\n' "$cur"
         else
-            bal=$(sqlite3 "$DB_FILE" \
+            bal=$(db \
                 "SELECT topped_up_balance_cents FROM balance_snapshots
                  WHERE currency = '$cur' ORDER BY id DESC LIMIT 1;" 2>/dev/null || echo "")
             if [ -z "$bal" ]; then
@@ -410,7 +414,7 @@ text_check_alert() {
             printf "%-4s disabled  (no threshold configured)\n" "$cur"
             continue
         fi
-        bal=$(sqlite3 "$DB_FILE" \
+        bal=$(db \
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$cur' ORDER BY id DESC LIMIT 1;" 2>/dev/null || echo "")
         if [ -z "$bal" ]; then
