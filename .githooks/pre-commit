@@ -16,7 +16,7 @@ echo ""
 # --- Syntax check ----------------------------------------------------------
 echo ">>> Syntax checks"
 for script in "$GIT_ROOT"/bin/*; do
-    if bash -n "$script" 2>&1; then
+    if bash -n -- "$script" 2>&1; then
         pass "$(basename "$script")"
     else
         fail "$(basename "$script") — fix syntax errors before committing"
@@ -27,7 +27,7 @@ done
 if command -v shellcheck &>/dev/null; then
     echo ">>> ShellCheck"
     for script in "$GIT_ROOT"/bin/*; do
-        if shellcheck -x "$script" 2>&1; then
+        if shellcheck -x -- "$script" 2>&1; then
             pass "shellcheck $(basename "$script")"
         else
             fail "shellcheck $(basename "$script") — fix warnings before committing"

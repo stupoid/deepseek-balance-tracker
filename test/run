@@ -87,7 +87,7 @@ assert_json_key() {
 }
 
 run_query() {
-    # Run deepseek-balance with optional flags, capture stdout
+    # Run deepseek-balance with the given arguments (caller captures stdout)
     "$BIN" "$@"
 }
 

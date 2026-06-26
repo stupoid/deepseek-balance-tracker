@@ -58,7 +58,7 @@ while getopts "c:jh" opt; do
         c) CURRENCY="$OPTARG" ;;
         j) OUTPUT_MODE="json" ;;
         h) usage ;;
-        *) usage ;;
+        *) echo "deepseek-balance: unknown flag '-$OPTARG'" >&2; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
@@ -146,8 +146,13 @@ avg_daily_spend_cents() {
 # --- JSON output functions (reuse existing JSON logic) ---------------------
 json_balance_row() {
     local c="$1" tc="$2" gc="$3" pc="$4" ts="$5"
-    printf '{"currency":"%s","total_balance":%s,"granted_balance":%s,"topped_up_balance":%s,"recorded_at":"%s"}' \
-        "$c" "$(cents_to_dollars "$tc")" "$(cents_to_dollars "$gc")" "$(cents_to_dollars "$pc")" "$ts"
+    jq -c -n \
+        --arg currency "$c" \
+        --argjson total_balance "$(cents_to_dollars "$tc")" \
+        --argjson granted_balance "$(cents_to_dollars "$gc")" \
+        --argjson topped_up_balance "$(cents_to_dollars "$pc")" \
+        --arg recorded_at "$ts" \
+        '{currency: $currency, total_balance: $total_balance, granted_balance: $granted_balance, topped_up_balance: $topped_up_balance, recorded_at: $recorded_at}'
 }
 
 json_current() {

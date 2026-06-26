@@ -17,6 +17,10 @@ If you top up and spend the entire amount between two consecutive polls, the net
 
 **Mitigation**: poll more frequently. At 5-minute intervals this window is small. The raw data is still recorded — if you know a top-up happened, you can query the snapshots directly.
 
+### Row cap silently prunes oldest data
+
+`MAX_ROWS` (default 1M) silently deletes the oldest rows when the row limit is exceeded — approximately 9.5 years of data at the default 5-minute poll interval. If you need unbounded history, set `MAX_ROWS=0` (no cap). Note that `RETENTION_DAYS` (age-based pruning, default 0 = disabled) runs after the row cap, so setting both results in whichever prunes more aggressively.
+
 ### Granted balance expiry
 
 If your granted (free) balance expires, `total_balance` drops without any API usage. This shows up as "spend" in the delta calculation even though you didn't consume any tokens.

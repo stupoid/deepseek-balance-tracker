@@ -20,9 +20,9 @@ No build step. The pre-commit hook (`.githooks/pre-commit`) runs `bash -n`, `she
 
 Two independent scripts communicate only through a shared SQLite database:
 
-**`bin/deepseek-balance-poll`** (210 lines) — Writer. Called by the systemd timer every 5 minutes. Fetches the DeepSeek API, parses the JSON response with `jq`, converts dollar strings to integer cents via `awk`, inserts rows. After insert: prunes old rows (row cap `MAX_ROWS`, default 1M), runs the alert state machine.
+**`bin/deepseek-balance-poll`** — Writer. Called by the systemd timer every 5 minutes. Fetches the DeepSeek API, parses the JSON response with `jq`, converts dollar strings to integer cents via `awk`, inserts rows. After insert: prunes old rows (row cap `MAX_ROWS`, default 1M), runs the alert state machine.
 
-**`bin/deepseek-balance`** (431 lines) — Reader. CLI for humans and scripts. Each subcommand (`current`, `today`, `recent`, `history`, `summary`, `check-alert`) has two implementations: `text_*` and `json_*`, dispatched on the `-j` flag. Never calls the API.
+**`bin/deepseek-balance`** — Reader. CLI for humans and scripts. Each subcommand (`current`, `today`, `recent`, `history`, `summary`, `check-alert`) has two implementations: `text_*` and `json_*`, dispatched on the `-j` flag. Never calls the API.
 
 ### Data flow
 
@@ -56,7 +56,7 @@ CREATE INDEX idx_snapshots_currency_time ON balance_snapshots(currency, recorded
 
 ### Test suite
 
-`test/run` (474 lines) uses a temporary directory with `XDG_DATA_HOME` pointed at it. Tests insert synthetic data via `insert_row()` helper, run the CLI, and assert output with `assert_contains`, `assert_not_contains`, `assert_json_key`. Covers: empty DB, single/multiple snapshots, spend calculation, top-up handling, currency filtering, UTC date boundaries, JSON output, alert exit codes, and the alert fire-once/re-arm state machine (mocking `curl`).
+`test/run` uses a temporary directory with `XDG_DATA_HOME` pointed at it. Tests insert synthetic data via `insert_row()` helper, run the CLI, and assert output with `assert_contains`, `assert_not_contains`, `assert_json_key`. Covers: empty DB, single/multiple snapshots, spend calculation, top-up handling, currency filtering, UTC date boundaries, JSON output, alert exit codes, and the alert fire-once/re-arm state machine (mocking `curl`).
 
 ## File map
 

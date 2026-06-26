@@ -54,7 +54,7 @@ EOF
 # --- Send via Telegram Bot API ---------------------------------------------
 curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
     -d "chat_id=${CHAT_ID}" \
-    -d "text=${MESSAGE}" \
+    --data-urlencode "text=${MESSAGE}" \
     >/dev/null 2>&1 || {
     echo "ALERT: Failed to send Telegram notification (curl exit code $?)" >&2
     exit 0  # don't fail the poll

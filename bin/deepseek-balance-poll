@@ -36,7 +36,7 @@ SECRETS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/deepseek-balance/secrets.env"
 
 # Validate currency
 if [[ ! "$CURRENCY" =~ ^(USD|CNY|both)$ ]]; then
-    echo "ERROR: invalid CURRENCY '$CURRENCY' — must be USD, CNY, or both" >&2
+    echo "deepseek-balance-poll: invalid CURRENCY '$CURRENCY' — must be USD, CNY, or both" >&2
     exit 1
 fi
 
@@ -49,7 +49,7 @@ if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
 fi
 
 if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-    echo "ERROR: DEEPSEEK_API_KEY is not set. Set it in the environment or in $SECRETS_FILE" >&2
+    echo "deepseek-balance-poll: DEEPSEEK_API_KEY is not set. Set it in the environment or in $SECRETS_FILE" >&2
     exit 1
 fi
 
@@ -70,7 +70,7 @@ HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | sed '$d')
 
 if [ "$HTTP_CODE" != "200" ]; then
-    echo "ERROR: API returned HTTP $HTTP_CODE: $BODY" >&2
+    echo "deepseek-balance-poll: API returned HTTP $HTTP_CODE: $BODY" >&2
     exit 2
 fi
 
@@ -109,7 +109,7 @@ SQL_BATCH=""
 while IFS='|' read -r currency total granted topped; do
     case "$currency" in
         USD|CNY) ;;
-        *) echo "ERROR: unexpected currency '$currency' from API — skipping" >&2; continue ;;
+        *) echo "deepseek-balance-poll: unexpected currency '$currency' from API — skipping" >&2; continue ;;
     esac
     total_cents=$(dollars_to_cents "$total")
     granted_cents=$(dollars_to_cents "$granted")
