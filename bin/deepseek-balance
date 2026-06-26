@@ -105,14 +105,15 @@ spend_in_window_cents() {
     local cur="$1" minutes="$2"
     sqlite3 "$DB_FILE" "
         WITH ordered AS (
-            SELECT topped_up_balance_cents,
-                   LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+            SELECT topped_up_balance_cents, recorded_at,
+                   LAG(topped_up_balance_cents) OVER (ORDER BY recorded_at) AS prev
             FROM balance_snapshots
             WHERE currency = '$cur'
-              AND recorded_at >= unixepoch('now', '-${minutes} minutes')
         )
         SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
-        FROM ordered WHERE prev IS NOT NULL;"
+        FROM ordered
+        WHERE prev IS NOT NULL
+          AND recorded_at >= unixepoch('now', '-${minutes} minutes');"
 }
 
 # Average daily spend (in cents) over N days for a currency.
@@ -120,17 +121,19 @@ avg_daily_spend_cents() {
     local cur="$1" days="$2"
     sqlite3 "$DB_FILE" "
         WITH consecutive AS (
-            SELECT date(recorded_at, 'unixepoch') AS day,
-                   topped_up_balance_cents,
-                   LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+            SELECT recorded_at / 86400 AS day,
+                   topped_up_balance_cents, recorded_at,
+                   LAG(topped_up_balance_cents) OVER (ORDER BY recorded_at) AS prev
             FROM balance_snapshots
             WHERE currency = '$cur'
-              AND date(recorded_at, 'unixepoch') >= date('now', '-${days} days')
-              AND date(recorded_at, 'unixepoch') < date('now')
         ),
         daily_spend AS (
             SELECT day, SUM(MAX(prev - topped_up_balance_cents, 0)) AS spend
-            FROM consecutive WHERE prev IS NOT NULL GROUP BY day
+            FROM consecutive
+            WHERE prev IS NOT NULL
+              AND recorded_at >= unixepoch('now', 'start of day', '-${days} days')
+              AND recorded_at < unixepoch('now', 'start of day')
+            GROUP BY day
         )
         SELECT COALESCE(ROUND(AVG(spend)), 0)
         FROM daily_spend WHERE spend > 0;"
@@ -168,16 +171,21 @@ json_today() {
         local sc rc
         sc=$(sqlite3 "$DB_FILE" "
             WITH ordered AS (
-                SELECT topped_up_balance_cents,
-                       LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+                SELECT topped_up_balance_cents, recorded_at,
+                       LAG(topped_up_balance_cents) OVER (ORDER BY recorded_at) AS prev
                 FROM balance_snapshots
-                WHERE currency = '$CUR' AND date(recorded_at, 'unixepoch') = date('now')
+                WHERE currency = '$CUR'
             )
             SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
-            FROM ordered WHERE prev IS NOT NULL;")
+            FROM ordered
+            WHERE prev IS NOT NULL
+              AND recorded_at >= unixepoch('now', 'start of day')
+              AND recorded_at < unixepoch('now', 'start of day', '+1 day');")
         rc=$(sqlite3 "$DB_FILE" \
             "SELECT COUNT(*) FROM balance_snapshots
-             WHERE currency = '$CUR' AND date(recorded_at, 'unixepoch') = date('now');")
+             WHERE currency = '$CUR'
+               AND recorded_at >= unixepoch('now', 'start of day')
+               AND recorded_at < unixepoch('now', 'start of day', '+1 day');")
         printf '  "%s": {"spend_today": %s, "snapshots_today": %s}' \
             "$CUR" "$(cents_to_dollars "$sc")" "$rc"
     done
@@ -212,7 +220,7 @@ json_summary() {
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
         dt=$(sqlite3 "$DB_FILE" \
-            "SELECT COUNT(DISTINCT date(recorded_at, 'unixepoch'))
+            "SELECT COUNT(DISTINCT recorded_at / 86400)
              FROM balance_snapshots WHERE currency = '$CUR';")
         a7=$(avg_daily_spend_cents "$CUR" 7)
         a30=$(avg_daily_spend_cents "$CUR" 30)
@@ -282,16 +290,21 @@ text_today() {
         local sc rc
         sc=$(sqlite3 "$DB_FILE" "
             WITH ordered AS (
-                SELECT topped_up_balance_cents,
-                       LAG(topped_up_balance_cents) OVER (ORDER BY id) AS prev
+                SELECT topped_up_balance_cents, recorded_at,
+                       LAG(topped_up_balance_cents) OVER (ORDER BY recorded_at) AS prev
                 FROM balance_snapshots
-                WHERE currency = '$CUR' AND date(recorded_at, 'unixepoch') = date('now')
+                WHERE currency = '$CUR'
             )
             SELECT COALESCE(SUM(MAX(prev - topped_up_balance_cents, 0)), 0)
-            FROM ordered WHERE prev IS NOT NULL;")
+            FROM ordered
+            WHERE prev IS NOT NULL
+              AND recorded_at >= unixepoch('now', 'start of day')
+              AND recorded_at < unixepoch('now', 'start of day', '+1 day');")
         rc=$(sqlite3 "$DB_FILE" \
             "SELECT COUNT(*) FROM balance_snapshots
-             WHERE currency = '$CUR' AND date(recorded_at, 'unixepoch') = date('now');")
+             WHERE currency = '$CUR'
+               AND recorded_at >= unixepoch('now', 'start of day')
+               AND recorded_at < unixepoch('now', 'start of day', '+1 day');")
         printf "%-4s spent \$%s today  (%s snapshots)\n" \
             "$CUR" "$(cents_to_dollars "$sc")" "$rc"
     done
@@ -315,7 +328,7 @@ text_summary() {
             "SELECT topped_up_balance_cents FROM balance_snapshots
              WHERE currency = '$CUR' ORDER BY id DESC LIMIT 1;")
         dt=$(sqlite3 "$DB_FILE" \
-            "SELECT COUNT(DISTINCT date(recorded_at, 'unixepoch'))
+            "SELECT COUNT(DISTINCT recorded_at / 86400)
              FROM balance_snapshots WHERE currency = '$CUR';")
         a7=$(avg_daily_spend_cents "$CUR" 7)
         a30=$(avg_daily_spend_cents "$CUR" 30)

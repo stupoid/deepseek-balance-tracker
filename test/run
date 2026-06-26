@@ -241,12 +241,12 @@ VALUES
 SQL
 
 OUT=$(run_query recent)
-# 3 rows inside 60-min window (450→430→420). Only 2 deltas: 450-430=20¢ + 430-420=10¢ = 30¢
-assert_contains "recent detects spend in last hour" "$OUT" "spent \$0.30"
+# 3 rows inside 60-min window (-55, -45, -35). Deltas: 500→450=50¢ + 450→430=20¢ + 430→420=10¢ = 80¢
+assert_contains "recent detects spend in last hour" "$OUT" "spent \$0.80"
 assert_contains "recent shows snapshot count" "$OUT" "3 snapshots"
 
 OUT=$(run_query -j recent)
-assert_json_key "json recent spend" "$OUT" '.USD.spend_last_hour' "0.30"
+assert_json_key "json recent spend" "$OUT" '.USD.spend_last_hour' "0.80"
 
 # --- Tests: edge cases -----------------------------------------------------
 
