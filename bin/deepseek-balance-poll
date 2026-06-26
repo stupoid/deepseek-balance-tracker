@@ -55,6 +55,7 @@ fi
 
 # --- Ensure DB dir exists --------------------------------------------------
 mkdir -p "$DB_DIR"
+chmod 700 "$DB_DIR"
 
 # sqlite3 wrapper with busy timeout (ms) — prevents instant failure if a
 # reader is mid-query during a WAL checkpoint.
@@ -88,6 +89,7 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
 CREATE INDEX IF NOT EXISTS idx_snapshots_currency_time
     ON balance_snapshots(currency, recorded_at);
 SQL
+chmod 600 "$DB_FILE" 2>/dev/null || true
 
 # --- Parse and insert ------------------------------------------------------
 # Convert dollar strings to integer cents (e.g. "4.26" -> 426)
@@ -151,6 +153,7 @@ echo "OK: inserted $INSERTED balance snapshot(s) (CURRENCY=$CURRENCY; rows=$TOTA
 ALERT_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/deepseek-balance-tracker"
 ALERT_STATE_FILE="$ALERT_STATE_DIR/alert-state"
 mkdir -p "$ALERT_STATE_DIR"
+chmod 700 "$ALERT_STATE_DIR" 2>/dev/null || true
 
 # Load threshold config from secrets if not already set (e.g. DEEPSEEK_API_KEY
 # was provided via env and source was skipped above).
