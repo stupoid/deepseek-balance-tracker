@@ -43,8 +43,8 @@ fi
 # --- API key ---------------------------------------------------------------
 if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
     if [ -f "$SECRETS_FILE" ]; then
-        # shellcheck source=/dev/null
-        source "$SECRETS_FILE"
+        key=$(sed -n 's/^DEEPSEEK_API_KEY=//p' "$SECRETS_FILE" 2>/dev/null || echo "")
+        [ -n "$key" ] && DEEPSEEK_API_KEY="$key"
     fi
 fi
 

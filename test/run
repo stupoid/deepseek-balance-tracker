@@ -500,6 +500,7 @@ PATH="$TMPDIR:$PATH" \
   XDG_DATA_HOME="$XDG_DATA_HOME" \
   XDG_CONFIG_HOME="$TMPDIR/config" \
   XDG_STATE_HOME="$TMPDIR/state" \
+  RETENTION_DAYS=90 \
   bash "$PROJECT_DIR/bin/deepseek-balance-poll" >/dev/null 2>&1 || true
 
 OLD_COUNT_AFTER=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM balance_snapshots WHERE recorded_at < unixepoch('now', '-90 days');")

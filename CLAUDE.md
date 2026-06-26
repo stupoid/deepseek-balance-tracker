@@ -38,7 +38,7 @@ deepseek-balance ← SQLite DB ← any script, bot, or status bar
 - **Spend = topped-up delta**: Spending is calculated as the decrease in `topped_up_balance` between consecutive snapshots using a SQLite window function (`LAG() OVER`, `MAX(prev - current, 0)`). Top-ups (balance increases) are ignored. Using `topped_up_balance` rather than `total_balance` avoids false spend from granted balance expiry.
 - **Alert state machine**: Fire-once, re-arm on recovery. State persisted to `~/.local/state/deepseek-balance-tracker/alert-state` as `CURRENCY:ok|fired` lines. The poll script checks thresholds after each insert; the `check-alert` subcommand only reads the current balance (stateless — does not read alert-state).
 - **XDG paths**: DB at `$XDG_DATA_HOME/deepseek-balance-tracker/balance.db`, secrets at `$XDG_CONFIG_HOME/deepseek-balance/secrets.env`, alert state at `$XDG_STATE_HOME/deepseek-balance-tracker/alert-state`. All default to `~/.local/share`, `~/.config`, `~/.local/state`.
-- **Config priority**: Environment variables override `secrets.env` file values. The poll script sources `secrets.env` only if `DEEPSEEK_API_KEY` is not already set; alert thresholds are read from env first, then `grep`'d from the file.
+- **Config priority**: Environment variables override `secrets.env` file values. The poll script reads `secrets.env` with `sed` (never `source` or `eval`). Env vars take priority: API key and alert thresholds are only read from the file if not already set in the environment.
 
 ### Database schema
 

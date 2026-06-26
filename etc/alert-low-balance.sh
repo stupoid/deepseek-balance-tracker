@@ -21,7 +21,12 @@ SECRETS_FILE="${SECRETS_FILE:-$HOME/.config/deepseek-balance/secrets.env}"
 # Source secrets if Telegram vars not already in environment
 if [ -z "${ALERT_TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${ALERT_TELEGRAM_CHAT_ID:-}" ]; then
     if [ -f "$SECRETS_FILE" ]; then
-        eval "$(grep -E '^(ALERT_TELEGRAM_BOT_TOKEN|ALERT_TELEGRAM_CHAT_ID)=' "$SECRETS_FILE" 2>/dev/null || true)"
+        if [ -z "${ALERT_TELEGRAM_BOT_TOKEN:-}" ]; then
+            ALERT_TELEGRAM_BOT_TOKEN=$(sed -n 's/^ALERT_TELEGRAM_BOT_TOKEN=//p' "$SECRETS_FILE" 2>/dev/null || echo "")
+        fi
+        if [ -z "${ALERT_TELEGRAM_CHAT_ID:-}" ]; then
+            ALERT_TELEGRAM_CHAT_ID=$(sed -n 's/^ALERT_TELEGRAM_CHAT_ID=//p' "$SECRETS_FILE" 2>/dev/null || echo "")
+        fi
     fi
 fi
 
