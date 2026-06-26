@@ -99,6 +99,10 @@ fi
 
 INSERTED=0
 while IFS='|' read -r currency total granted topped; do
+    case "$currency" in
+        USD|CNY) ;;
+        *) echo "ERROR: unexpected currency '$currency' from API — skipping" >&2; continue ;;
+    esac
     total_cents=$(dollars_to_cents "$total")
     granted_cents=$(dollars_to_cents "$granted")
     topped_cents=$(dollars_to_cents "$topped")

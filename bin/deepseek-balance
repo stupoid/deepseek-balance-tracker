@@ -85,7 +85,10 @@ fi
 # --- Helpers ---------------------------------------------------------------
 get_currencies() {
     if [ "$CURRENCY" = "both" ]; then
-        sqlite3 "$DB_FILE" "SELECT DISTINCT currency FROM balance_snapshots ORDER BY currency;"
+        sqlite3 "$DB_FILE" "SELECT DISTINCT currency FROM balance_snapshots ORDER BY currency;" \
+            | while read -r c; do
+                case "$c" in USD|CNY) echo "$c" ;; *) ;; esac
+              done
     else
         echo "$CURRENCY"
     fi
