@@ -169,57 +169,59 @@ run_alert_check() {
     # Skip if threshold not set or empty
     [ -n "$threshold" ] || return 0
 
-    # Get latest topped_up_balance in cents
-    local balance_cents
-    balance_cents=$(sqlite3 "$DB_FILE" \
-        "SELECT topped_up_balance_cents FROM balance_snapshots
-         WHERE currency = '$currency' ORDER BY id DESC LIMIT 1;")
-    [ -n "$balance_cents" ] || return 0  # No data yet
+    # Lock around the full read-check-write cycle so two concurrent polls
+    # can't both read "ok" and both fire the alert command.
+    (
+        flock -x 200
 
-    # Read current alert state (default: ok)
-    local current_state="ok"
-    if [ -f "$ALERT_STATE_FILE" ]; then
-        current_state=$(grep "^${currency}:" "$ALERT_STATE_FILE" 2>/dev/null | cut -d: -f2 || echo "ok")
-    fi
+        # Get latest topped_up_balance in cents
+        local balance_cents
+        balance_cents=$(sqlite3 "$DB_FILE" \
+            "SELECT topped_up_balance_cents FROM balance_snapshots
+             WHERE currency = '$currency' ORDER BY id DESC LIMIT 1;")
+        [ -n "$balance_cents" ] || exit 0  # No data yet
 
-    # Convert threshold to cents
-    local threshold_cents
-    threshold_cents=$(awk -v t="$threshold" 'BEGIN { printf "%d", (t + 0.0) * 100 + 0.5 }')
-    local balance_dollars
-    balance_dollars=$(awk -v c="$balance_cents" 'BEGIN { printf "%.2f", c / 100.0 }')
-
-    # Update state file helper
-    _write_alert_state() {
-        local new_state="$1"
+        # Read current alert state (default: ok)
+        local current_state="ok"
         if [ -f "$ALERT_STATE_FILE" ]; then
+            current_state=$(grep "^${currency}:" "$ALERT_STATE_FILE" 2>/dev/null | cut -d: -f2 || echo "ok")
+        fi
+
+        # Convert threshold to cents
+        local threshold_cents
+        threshold_cents=$(awk -v t="$threshold" 'BEGIN { printf "%d", (t + 0.0) * 100 + 0.5 }')
+        local balance_dollars
+        balance_dollars=$(awk -v c="$balance_cents" 'BEGIN { printf "%.2f", c / 100.0 }')
+
+        # Update state file helper (already under lock)
+        _write_alert_state() {
+            local new_state="$1"
             if grep -q "^${currency}:" "$ALERT_STATE_FILE" 2>/dev/null; then
                 sed -i "s/^${currency}:.*/${currency}:${new_state}/" "$ALERT_STATE_FILE"
             else
                 echo "${currency}:${new_state}" >> "$ALERT_STATE_FILE"
             fi
-        else
-            echo "${currency}:${new_state}" > "$ALERT_STATE_FILE"
-        fi
-    }
+        }
 
-    if [ "$balance_cents" -lt "$threshold_cents" ] && [ "$current_state" = "ok" ]; then
-        _write_alert_state "fired"
-        echo "ALERT: ${currency} balance \$${balance_dollars} is below threshold \$${threshold} — executing ALERT_COMMAND" >&2
-        if [ -n "${ALERT_COMMAND:-}" ]; then
-            if [ -x "$ALERT_COMMAND" ]; then
-                DBT_BALANCE="$balance_dollars" \
-                DBT_BALANCE_CENTS="$balance_cents" \
-                DBT_THRESHOLD="$threshold" \
-                DBT_CURRENCY="$currency" \
-                "$ALERT_COMMAND" || true
-            else
-                echo "ALERT: ALERT_COMMAND is not executable: $ALERT_COMMAND" >&2
+        if [ "$balance_cents" -lt "$threshold_cents" ] && [ "$current_state" = "ok" ]; then
+            _write_alert_state "fired"
+            echo "ALERT: ${currency} balance \$${balance_dollars} is below threshold \$${threshold} — executing ALERT_COMMAND" >&2
+            if [ -n "${ALERT_COMMAND:-}" ]; then
+                if [ -x "$ALERT_COMMAND" ]; then
+                    DBT_BALANCE="$balance_dollars" \
+                    DBT_BALANCE_CENTS="$balance_cents" \
+                    DBT_THRESHOLD="$threshold" \
+                    DBT_CURRENCY="$currency" \
+                    "$ALERT_COMMAND" || true
+                else
+                    echo "ALERT: ALERT_COMMAND is not executable: $ALERT_COMMAND" >&2
+                fi
             fi
+        elif [ "$balance_cents" -ge "$threshold_cents" ] && [ "$current_state" = "fired" ]; then
+            _write_alert_state "ok"
+            echo "ALERT: ${currency} balance \$${balance_dollars} is back above threshold \$${threshold} — alert re-armed" >&2
         fi
-    elif [ "$balance_cents" -ge "$threshold_cents" ] && [ "$current_state" = "fired" ]; then
-        _write_alert_state "ok"
-        echo "ALERT: ${currency} balance \$${balance_dollars} is back above threshold \$${threshold} — alert re-armed" >&2
-    fi
+    ) 200>"$ALERT_STATE_DIR/alert.lock"
 }
 
 run_alert_check "USD" "ALERT_THRESHOLD_USD"
