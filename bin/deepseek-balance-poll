@@ -98,6 +98,7 @@ else
 fi
 
 INSERTED=0
+SQL_BATCH=""
 while IFS='|' read -r currency total granted topped; do
     case "$currency" in
         USD|CNY) ;;
@@ -106,11 +107,14 @@ while IFS='|' read -r currency total granted topped; do
     total_cents=$(dollars_to_cents "$total")
     granted_cents=$(dollars_to_cents "$granted")
     topped_cents=$(dollars_to_cents "$topped")
-    sqlite3 "$DB_FILE" \
-        "INSERT INTO balance_snapshots (currency, total_balance_cents, granted_balance_cents, topped_up_balance_cents)
-         VALUES ('$currency', $total_cents, $granted_cents, $topped_cents);"
+    SQL_BATCH="${SQL_BATCH}INSERT INTO balance_snapshots (currency, total_balance_cents, granted_balance_cents, topped_up_balance_cents) VALUES ('$currency', $total_cents, $granted_cents, $topped_cents);
+"
     INSERTED=$((INSERTED + 1))
 done < <(echo "$BODY" | jq -r "$JQ_FILTER | \"\(.currency)|\(.total_balance)|\(.granted_balance)|\(.topped_up_balance)\"")
+
+if [ "$INSERTED" -gt 0 ]; then
+    printf '%s' "$SQL_BATCH" | sqlite3 "$DB_FILE"
+fi
 
 if [ "$INSERTED" -eq 0 ]; then
     echo "WARNING: No balance rows inserted (CURRENCY=$CURRENCY). API response: $BODY" >&2
